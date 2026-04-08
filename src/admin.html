@@ -1,0 +1,243 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Chriscord Admin</title>
+<style>
+  :root {
+    --bg:      #0e1117;
+    --surface: #1a1d27;
+    --border:  #2e3248;
+    --accent:  #7289da;
+    --green:   #43b581;
+    --red:     #f04747;
+    --text:    #dcddde;
+    --muted:   #72767d;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: 'Segoe UI', system-ui, sans-serif; background: var(--bg); color: var(--text); padding: 24px; max-width: 900px; margin: 0 auto; }
+  h1 { color: var(--accent); font-size: 1.6rem; margin-bottom: 6px; }
+  h2 { font-size: 1.1rem; margin-bottom: 12px; color: var(--text); }
+  h3 { font-size: 0.95rem; margin: 12px 0 8px; color: var(--muted); text-transform: uppercase; letter-spacing: .05em; }
+  .card { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 20px; margin-bottom: 20px; }
+  label { display: block; font-size: 0.85rem; color: var(--muted); margin-bottom: 4px; margin-top: 10px; }
+  input[type=text], input[type=password] {
+    width: 100%; padding: 8px 12px; border-radius: 6px;
+    border: 1px solid var(--border); background: var(--bg);
+    color: var(--text); font-size: 0.9rem;
+  }
+  input:focus { outline: 2px solid var(--accent); border-color: transparent; }
+  .row { display: flex; gap: 10px; align-items: flex-end; flex-wrap: wrap; }
+  .row input { flex: 1; min-width: 120px; }
+  button {
+    padding: 8px 16px; border-radius: 6px; border: none;
+    background: var(--accent); color: #fff; font-size: 0.9rem;
+    cursor: pointer; white-space: nowrap;
+  }
+  button:hover { filter: brightness(1.15); }
+  button.danger { background: var(--red); }
+  button.small  { padding: 4px 10px; font-size: 0.8rem; }
+  .key-box {
+    font-family: 'Courier New', monospace; background: var(--bg);
+    border: 1px solid var(--border); border-radius: 6px;
+    padding: 10px 14px; letter-spacing: 2px; font-size: 0.95rem;
+    display: flex; align-items: center; justify-content: space-between; gap: 8px;
+  }
+  .key-box span { word-break: break-all; }
+  .msg { margin-top: 8px; font-size: 0.85rem; min-height: 18px; }
+  .ok  { color: var(--green); }
+  .err { color: var(--red); }
+  .room-block { border: 1px solid var(--border); border-radius: 8px; padding: 14px; margin-bottom: 12px; }
+  .room-header { display: flex; justify-content: space-between; align-items: center; }
+  .room-name { font-weight: 600; font-size: 1rem; }
+  .badge { font-size: 0.75rem; color: var(--muted); margin-left: 6px; }
+  .boards-list { display: flex; flex-wrap: wrap; gap: 6px; margin: 10px 0; }
+  .board-chip {
+    background: var(--bg); border: 1px solid var(--border);
+    border-radius: 20px; padding: 3px 10px; font-size: 0.8rem;
+    display: flex; align-items: center; gap: 6px;
+  }
+  .board-chip button { padding: 0 4px; background: none; color: var(--red); font-size: 1rem; line-height: 1; }
+  .add-board-row { display: flex; gap: 6px; margin-top: 8px; }
+  .add-board-row input { flex: 1; }
+  hr { border: none; border-top: 1px solid var(--border); margin: 16px 0; }
+</style>
+</head>
+<body>
+
+<h1>🎮 Chriscord Admin</h1>
+<p style="color:var(--muted);margin-bottom:20px;font-size:.9rem">Server management panel — keep your owner key secret.</p>
+
+<!-- Keys -->
+<div class="card">
+  <h2>Server Keys</h2>
+  <label>Owner Key (admin access — never share this)</label>
+  <div class="key-box"><span id="owner-key">loading…</span><button class="small" onclick="copy('owner-key')">Copy</button></div>
+  <label>Join Key (give this to friends — blank = open server)</label>
+  <div class="key-box"><span id="join-key">loading…</span><button class="small" onclick="copy('join-key')">Copy</button></div>
+</div>
+
+<!-- Settings -->
+<div class="card">
+  <h2>Server Settings</h2>
+  <label>Server Name</label>
+  <input type="text" id="cfg-name" placeholder="My Chriscord Server">
+  <label>Join Key (leave blank for open server)</label>
+  <input type="text" id="cfg-joinkey" placeholder="e.g. abc123 or leave blank">
+  <label>Owner Key (required to save)</label>
+  <input type="password" id="cfg-ownerkey" placeholder="Paste your owner key">
+  <div style="margin-top:12px"><button onclick="saveSettings()">Save Settings</button></div>
+  <div class="msg" id="settings-msg"></div>
+</div>
+
+<!-- Rooms & Boards -->
+<div class="card">
+  <h2>Rooms &amp; Boards</h2>
+  <div id="rooms-list"><em style="color:var(--muted)">Loading…</em></div>
+  <hr>
+  <h3>Create New Room</h3>
+  <div class="row">
+    <input type="text" id="new-room-name" placeholder="Room name (e.g. Hangout)">
+    <label style="margin:0;display:flex;align-items:center;gap:6px;white-space:nowrap">
+      <input type="checkbox" id="new-room-private"> Private
+    </label>
+    <input type="password" id="new-room-key" placeholder="Owner key">
+    <button onclick="createRoom()">Create Room</button>
+  </div>
+  <div class="msg" id="room-msg"></div>
+</div>
+
+<script>
+let serverData = {};
+
+async function loadAll() {
+  const [infoRes, roomsRes] = await Promise.all([
+    fetch('/api/admin/info'),
+    fetch('/api/rooms?_noauth=1'), // rooms list without token for admin
+  ]);
+  if (infoRes.ok) {
+    const d = await infoRes.json();
+    serverData = d;
+    document.getElementById('owner-key').textContent = d.owner_key;
+    document.getElementById('join-key').textContent  = d.server_key || '(none — open server)';
+    document.getElementById('cfg-name').value        = d.server_name;
+    document.getElementById('cfg-joinkey').value     = d.server_key || '';
+  }
+  if (roomsRes.ok) {
+    renderRooms(await roomsRes.json());
+  }
+}
+
+async function renderRooms(rooms) {
+  const el = document.getElementById('rooms-list');
+  if (!rooms.length) { el.innerHTML = '<em style="color:var(--muted)">No rooms yet — create one below.</em>'; return; }
+
+  el.innerHTML = '';
+  for (const room of rooms) {
+    const div = document.createElement('div');
+    div.className = 'room-block';
+    div.id = 'room-' + room.id;
+
+    // Fetch boards for this room
+    const bRes = await fetch('/api/rooms/' + room.id + '/boards');
+    const boards = bRes.ok ? await bRes.json() : [];
+
+    const boardChips = boards.map(b => `
+      <div class="board-chip">
+        #${b.name}
+        <button title="Delete board" onclick="deleteBoard('${b.id}', '${room.id}')">×</button>
+      </div>`).join('') || '<span style="color:var(--muted);font-size:.8rem">No boards</span>';
+
+    div.innerHTML = `
+      <div class="room-header">
+        <div><span class="room-name">🏠 ${room.name}</span><span class="badge">${room.is_private ? '🔒 private' : 'public'}</span></div>
+        <button class="small danger" onclick="deleteRoom('${room.id}')">Delete Room</button>
+      </div>
+      <div class="boards-list" id="boards-${room.id}">${boardChips}</div>
+      <div class="add-board-row">
+        <input type="text"     id="bname-${room.id}" placeholder="New board name (e.g. general)">
+        <input type="password" id="bkey-${room.id}"  placeholder="Owner key">
+        <button class="small" onclick="createBoard('${room.id}')">+ Board</button>
+      </div>`;
+    el.appendChild(div);
+  }
+}
+
+async function saveSettings() {
+  const ownerKey = document.getElementById('cfg-ownerkey').value;
+  const name     = document.getElementById('cfg-name').value.trim();
+  const joinKey  = document.getElementById('cfg-joinkey').value;
+  const msg      = document.getElementById('settings-msg');
+
+  const res = await fetch('/api/admin/settings', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'X-Owner-Key': ownerKey },
+    body: JSON.stringify({ server_name: name, server_key: joinKey }),
+  });
+  if (res.ok) { msg.className='msg ok'; msg.textContent='✓ Saved!'; loadAll(); }
+  else { const e=await res.json(); msg.className='msg err'; msg.textContent='✗ '+e.error; }
+}
+
+async function createRoom() {
+  const name       = document.getElementById('new-room-name').value.trim();
+  const is_private = document.getElementById('new-room-private').checked;
+  const ownerKey   = document.getElementById('new-room-key').value;
+  const msg        = document.getElementById('room-msg');
+
+  const res = await fetch('/api/admin/rooms', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'X-Owner-Key': ownerKey },
+    body: JSON.stringify({ name, is_private }),
+  });
+  if (res.ok) { msg.className='msg ok'; msg.textContent='✓ Room created!'; document.getElementById('new-room-name').value=''; loadAll(); }
+  else { const e=await res.json(); msg.className='msg err'; msg.textContent='✗ '+e.error; }
+}
+
+async function deleteRoom(roomId) {
+  const ownerKey = prompt('Enter owner key to delete this room (and all its boards):');
+  if (!ownerKey) return;
+  const res = await fetch('/api/admin/rooms/'+roomId, {
+    method: 'DELETE', headers: { 'X-Owner-Key': ownerKey },
+  });
+  if (res.ok) loadAll();
+  else { const e=await res.json(); alert('Error: '+e.error); }
+}
+
+async function createBoard(roomId) {
+  const name     = document.getElementById('bname-'+roomId).value.trim();
+  const ownerKey = document.getElementById('bkey-'+roomId).value;
+  if (!name) return;
+  const res = await fetch('/api/admin/boards', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'X-Owner-Key': ownerKey },
+    body: JSON.stringify({ room_id: roomId, name }),
+  });
+  if (res.ok) { document.getElementById('bname-'+roomId).value=''; loadAll(); }
+  else { const e=await res.json(); alert('Error: '+e.error); }
+}
+
+async function deleteBoard(boardId, roomId) {
+  const ownerKey = prompt('Enter owner key to delete this board:');
+  if (!ownerKey) return;
+  const res = await fetch('/api/admin/boards/'+boardId, {
+    method: 'DELETE', headers: { 'X-Owner-Key': ownerKey },
+  });
+  if (res.ok) loadAll();
+  else { const e=await res.json(); alert('Error: '+e.error); }
+}
+
+function copy(id) {
+  const text = document.getElementById(id).textContent;
+  navigator.clipboard.writeText(text).then(() => {
+    const el = document.getElementById(id);
+    const orig = el.textContent;
+    el.textContent = 'Copied!';
+    setTimeout(() => el.textContent = orig, 1500);
+  });
+}
+
+loadAll();
+</script>
+</body>
+</html>

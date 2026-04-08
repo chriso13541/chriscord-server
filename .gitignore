@@ -1,0 +1,5 @@
+/target
+chriscord.db
+chriscord.db-shm
+chriscord.db-wal
+*.md
