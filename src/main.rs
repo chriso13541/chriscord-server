@@ -66,7 +66,7 @@ async fn main() {
         .route("/admin",                  get(admin::admin_ui))
         .route("/api/admin/info",         get(admin::get_admin_info))
         .route("/api/admin/settings",     post(admin::update_settings))
-        .route("/api/admin/rooms",        post(admin::create_room))
+        .route("/api/admin/rooms",        get(admin::list_rooms_admin).post(admin::create_room))
         .route("/api/admin/rooms/:id",    delete(admin::delete_room))
         .route("/api/admin/boards",       post(admin::create_board))
         .route("/api/admin/boards/:id",   delete(admin::delete_board))

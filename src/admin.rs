@@ -149,6 +149,33 @@ pub async fn create_room(
     Ok(Json(serde_json::json!({ "id": id, "name": name })))
 }
 
+/// GET /api/admin/rooms — list all rooms, authenticated by owner key.
+/// Used by the admin UI (which has no session token).
+pub async fn list_rooms_admin(
+    headers: HeaderMap,
+    State(s): State<Arc<AppState>>,
+) -> Result<Json<serde_json::Value>, ApiErr> {
+    check_owner(&headers, &s)?;
+
+    let rows = sqlx::query("SELECT id, name, is_private FROM rooms ORDER BY created_at ASC")
+        .fetch_all(&s.pool)
+        .await
+        .map_err(|_| dberr())?;
+
+    let rooms: Vec<_> = rows
+        .iter()
+        .map(|r| {
+            serde_json::json!({
+                "id":         r.get::<String, _>("id"),
+                "name":       r.get::<String, _>("name"),
+                "is_private": r.get::<i64, _>("is_private") != 0,
+            })
+        })
+        .collect();
+
+    Ok(Json(serde_json::json!(rooms)))
+}
+
 /// DELETE /api/admin/rooms/:id — delete a room and all its boards/messages.
 pub async fn delete_room(
     headers: HeaderMap,

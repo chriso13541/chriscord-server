@@ -112,21 +112,20 @@
 let serverData = {};
 
 async function loadAll() {
-  const [infoRes, roomsRes] = await Promise.all([
-    fetch('/api/admin/info'),
-    fetch('/api/rooms?_noauth=1'), // rooms list without token for admin
-  ]);
-  if (infoRes.ok) {
-    const d = await infoRes.json();
-    serverData = d;
-    document.getElementById('owner-key').textContent = d.owner_key;
-    document.getElementById('join-key').textContent  = d.server_key || '(none — open server)';
-    document.getElementById('cfg-name').value        = d.server_name;
-    document.getElementById('cfg-joinkey').value     = d.server_key || '';
-  }
-  if (roomsRes.ok) {
-    renderRooms(await roomsRes.json());
-  }
+  const infoRes = await fetch('/api/admin/info');
+  if (!infoRes.ok) { document.getElementById('rooms-list').textContent = 'Failed to load admin info.'; return; }
+  const d = await infoRes.json();
+  serverData = d;
+  document.getElementById('owner-key').textContent = d.owner_key;
+  document.getElementById('join-key').textContent  = d.server_key || '(none — open server)';
+  document.getElementById('cfg-name').value        = d.server_name;
+  document.getElementById('cfg-joinkey').value     = d.server_key || '';
+
+  // Use owner-key-authenticated endpoint so we don't need a session token
+  const roomsRes = await fetch('/api/admin/rooms', {
+    headers: { 'X-Owner-Key': d.owner_key }
+  });
+  if (roomsRes.ok) renderRooms(await roomsRes.json());
 }
 
 async function renderRooms(rooms) {
@@ -139,8 +138,11 @@ async function renderRooms(rooms) {
     div.className = 'room-block';
     div.id = 'room-' + room.id;
 
-    // Fetch boards for this room
-    const bRes = await fetch('/api/rooms/' + room.id + '/boards');
+    // Fetch boards for this room (rooms endpoint accepts session token;
+    // use a dummy GET via the admin-aware boards list)
+    const bRes = await fetch('/api/rooms/' + room.id + '/boards', {
+      headers: { 'X-Owner-Key': serverData.owner_key }
+    });
     const boards = bRes.ok ? await bRes.json() : [];
 
     const boardChips = boards.map(b => `

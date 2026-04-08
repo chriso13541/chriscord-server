@@ -80,18 +80,25 @@ pub async fn list_rooms(
     ))
 }
 
-/// GET /api/rooms/:id/boards — boards are readable by any authenticated user.
+/// GET /api/rooms/:id/boards — boards readable by any authenticated user or owner.
 pub async fn list_boards(
     headers: HeaderMap,
     Path(room_id): Path<String>,
     State(s): State<Arc<AppState>>,
 ) -> Result<Json<Vec<Board>>, ApiErr> {
-    if db::verify_token(&s.pool, token_from(&headers))
-        .await
-        .map_err(|_| db_err())?
-        .is_none()
-    {
-        return Err(unauth());
+    // Accept either a valid session token OR the owner key
+    let token     = token_from(&headers);
+    let owner_key = headers.get("X-Owner-Key").and_then(|v| v.to_str().ok()).unwrap_or("");
+    let is_owner  = !owner_key.is_empty() && owner_key == s.owner_key;
+
+    if !is_owner {
+        if db::verify_token(&s.pool, token)
+            .await
+            .map_err(|_| db_err())?
+            .is_none()
+        {
+            return Err(unauth());
+        }
     }
 
     let rows = sqlx::query(
