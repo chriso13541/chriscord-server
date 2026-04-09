@@ -84,9 +84,10 @@ pub async fn init() -> Result<SqlitePool, sqlx::Error> {
         "ALTER TABLE messages ADD COLUMN attachment_url  TEXT",
         "ALTER TABLE messages ADD COLUMN attachment_name TEXT",
         "ALTER TABLE messages ADD COLUMN attachment_mime TEXT",
+        "ALTER TABLE messages ADD COLUMN edited INTEGER NOT NULL DEFAULT 0",
     ];
     for sql in migrations {
-        let _ = sqlx::query(sql).execute(&pool).await; // ignore "duplicate column" error
+        let _ = sqlx::query(sql).execute(&pool).await;
     }
 
     Ok(pool)

@@ -106,6 +106,11 @@ async fn handle_socket(socket: WebSocket, token: String, state: Arc<AppState>) {
                                         .map(|bid| v["data"]["board_id"].as_str() == Some(bid))
                                         .unwrap_or(false)
                                 }
+                                Some("message_edit") | Some("message_delete") => {
+                                    subscribed_board.as_deref()
+                                        .map(|bid| v["board_id"].as_str() == Some(bid))
+                                        .unwrap_or(false)
+                                }
                                 _ => false,
                             };
                             if fwd {
@@ -155,7 +160,7 @@ fn broadcast_users(state: &Arc<AppState>) {
 async fn load_history(state: &Arc<AppState>, board_id: &str) -> Vec<serde_json::Value> {
     let rows = match sqlx::query(
         "SELECT id, board_id, username, content,
-                attachment_url, attachment_name, attachment_mime, created_at
+                attachment_url, attachment_name, attachment_mime, edited, created_at
          FROM messages WHERE board_id = ?
          ORDER BY created_at ASC LIMIT 100",
     )
@@ -163,14 +168,11 @@ async fn load_history(state: &Arc<AppState>, board_id: &str) -> Vec<serde_json::
     .fetch_all(&state.pool)
     .await {
         Ok(r)  => r,
-        Err(e) => {
-            tracing::error!("load_history query failed: {}", e);
-            return vec![];
-        }
+        Err(e) => { tracing::error!("load_history: {}", e); return vec![]; }
     };
 
     rows.iter()
-        .filter_map(|r| serde_json::to_value(row_to_msg(r)).ok())
+        .filter_map(|r| serde_json::to_value(crate::messages::row_to_msg(r)).ok())
         .collect()
 }
 
@@ -188,8 +190,8 @@ async fn save_and_broadcast(
 
     let _ = sqlx::query(
         "INSERT INTO messages (id, board_id, username, content,
-            attachment_url, attachment_name, attachment_mime, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            attachment_url, attachment_name, attachment_mime, edited, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?)",
     )
     .bind(&id).bind(board_id).bind(username).bind(content)
     .bind(&attachment_url).bind(&attachment_name).bind(&attachment_mime)
@@ -201,6 +203,7 @@ async fn save_and_broadcast(
         id, board_id: board_id.to_string(), username: username.to_string(),
         content: content.to_string(),
         attachment_url, attachment_name, attachment_mime,
+        edited: false,
         created_at: now,
     };
     let payload = serde_json::json!({ "type": "message", "data": msg });

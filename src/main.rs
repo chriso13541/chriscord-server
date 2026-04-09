@@ -9,7 +9,8 @@ mod utils;
 mod ws;
 
 use axum::{
-    routing::{delete, get, post},
+    extract::DefaultBodyLimit,
+    routing::{delete, get, patch, post},
     Router,
 };
 use std::collections::HashMap;
@@ -68,8 +69,12 @@ async fn main() {
         .route("/api/rooms/:id/boards", get(rooms::list_boards))
         .route("/api/boards/:id/messages",
             get(messages::get_messages).post(messages::post_message))
-        // Files
-        .route("/api/upload",           post(files::upload))
+        // Message actions
+        .route("/api/messages/:id",
+            patch(messages::edit_message).delete(messages::delete_message))
+        // Files — body limit removed so large uploads work
+        .route("/api/upload",           post(files::upload)
+            .layer(DefaultBodyLimit::disable()))
         .route("/api/files/:filename",  get(files::serve_file))
         // WebSocket
         .route("/ws",                   get(ws::ws_handler))
