@@ -22,9 +22,20 @@ pub async fn init() -> Result<SqlitePool, sqlx::Error> {
     .await?;
 
     sqlx::query(
+        "CREATE TABLE IF NOT EXISTS users (
+            public_key TEXT PRIMARY KEY,
+            username   TEXT NOT NULL UNIQUE,
+            created_at TEXT NOT NULL
+        )",
+    )
+    .execute(&pool)
+    .await?;
+
+    sqlx::query(
         "CREATE TABLE IF NOT EXISTS sessions (
             token      TEXT PRIMARY KEY,
             username   TEXT NOT NULL,
+            public_key TEXT NOT NULL DEFAULT '',
             created_at TEXT NOT NULL
         )",
     )
@@ -85,7 +96,8 @@ pub async fn init() -> Result<SqlitePool, sqlx::Error> {
         "ALTER TABLE messages ADD COLUMN attachment_name TEXT",
         "ALTER TABLE messages ADD COLUMN attachment_mime TEXT",
         "ALTER TABLE messages ADD COLUMN edited      INTEGER NOT NULL DEFAULT 0",
-        "ALTER TABLE messages ADD COLUMN attachments TEXT",  // JSON array of {url,name,mime}
+        "ALTER TABLE messages ADD COLUMN attachments TEXT",
+        "ALTER TABLE sessions ADD COLUMN public_key  TEXT NOT NULL DEFAULT ''",
     ];
     for sql in migrations {
         let _ = sqlx::query(sql).execute(&pool).await;

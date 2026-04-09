@@ -40,7 +40,8 @@ async fn main() {
         pool,
         owner_key: owner_key.clone(),
         tx,
-        online: Mutex::new(HashMap::new()),
+        online:     Mutex::new(HashMap::new()),
+        challenges: Mutex::new(HashMap::new()),
     });
 
     println!();
@@ -62,6 +63,7 @@ async fn main() {
         .route("/api/admin/boards",     post(admin::create_board))
         .route("/api/admin/boards/:id", delete(admin::delete_board))
         .route("/api/info",             get(auth::server_info))
+        .route("/api/challenge",        post(auth::challenge))
         .route("/api/join",             post(auth::join))
         .route("/api/rooms",            get(rooms::list_rooms))
         .route("/api/rooms/:id/boards", get(rooms::list_boards))
