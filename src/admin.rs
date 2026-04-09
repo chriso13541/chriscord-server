@@ -131,7 +131,7 @@ pub async fn create_room(
         return Err(bad("Room name is required"));
     }
 
-    let id         = uuid::Uuid::new_v4().to_string();
+    let id         = uuid::Uuid::now_v7().to_string();
     let is_private = body.is_private.unwrap_or(false) as i64;
     let now        = chrono::Utc::now().to_rfc3339();
 
@@ -228,7 +228,7 @@ pub async fn create_board(
         return Err(bad("Room not found"));
     }
 
-    let id  = uuid::Uuid::new_v4().to_string();
+    let id  = uuid::Uuid::now_v7().to_string();
     let now = chrono::Utc::now().to_rfc3339();
 
     sqlx::query(

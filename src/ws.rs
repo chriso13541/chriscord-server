@@ -139,7 +139,7 @@ async fn save_and_broadcast(
     content:     &str,
     attachments: Vec<Attachment>,
 ) {
-    let id              = uuid::Uuid::new_v4().to_string();
+    let id              = uuid::Uuid::now_v7().to_string();
     let now             = chrono::Utc::now().to_rfc3339();
     let attach_json     = serde_json::to_string(&attachments).unwrap_or_default();
 

@@ -126,7 +126,7 @@ pub async fn post_message(
         return Err((StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": "Must have content or attachment" }))));
     }
 
-    let id              = uuid::Uuid::new_v4().to_string();
+    let id              = uuid::Uuid::now_v7().to_string();
     let now             = chrono::Utc::now().to_rfc3339();
     let attachments_json = serde_json::to_string(&attachments).unwrap_or_default();
 
