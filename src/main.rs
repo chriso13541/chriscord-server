@@ -3,6 +3,7 @@ mod auth;
 mod db;
 mod files;
 mod messages;
+mod preview;
 mod rooms;
 mod state;
 mod utils;
@@ -53,7 +54,6 @@ async fn main() {
     println!();
 
     let app = Router::new()
-        // Admin
         .route("/admin",                get(admin::admin_ui))
         .route("/api/admin/info",       get(admin::get_admin_info))
         .route("/api/admin/settings",   post(admin::update_settings))
@@ -61,22 +61,18 @@ async fn main() {
         .route("/api/admin/rooms/:id",  delete(admin::delete_room))
         .route("/api/admin/boards",     post(admin::create_board))
         .route("/api/admin/boards/:id", delete(admin::delete_board))
-        // Public
         .route("/api/info",             get(auth::server_info))
         .route("/api/join",             post(auth::join))
-        // Authenticated
         .route("/api/rooms",            get(rooms::list_rooms))
         .route("/api/rooms/:id/boards", get(rooms::list_boards))
         .route("/api/boards/:id/messages",
             get(messages::get_messages).post(messages::post_message))
-        // Message actions
         .route("/api/messages/:id",
             patch(messages::edit_message).delete(messages::delete_message))
-        // Files — body limit removed so large uploads work
-        .route("/api/upload",           post(files::upload)
+        .route("/api/upload", post(files::upload)
             .layer(DefaultBodyLimit::disable()))
         .route("/api/files/:filename",  get(files::serve_file))
-        // WebSocket
+        .route("/api/preview",          get(preview::get_preview))
         .route("/ws",                   get(ws::ws_handler))
         .layer(CorsLayer::permissive())
         .with_state(state);

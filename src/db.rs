@@ -84,7 +84,8 @@ pub async fn init() -> Result<SqlitePool, sqlx::Error> {
         "ALTER TABLE messages ADD COLUMN attachment_url  TEXT",
         "ALTER TABLE messages ADD COLUMN attachment_name TEXT",
         "ALTER TABLE messages ADD COLUMN attachment_mime TEXT",
-        "ALTER TABLE messages ADD COLUMN edited INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE messages ADD COLUMN edited      INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE messages ADD COLUMN attachments TEXT",  // JSON array of {url,name,mime}
     ];
     for sql in migrations {
         let _ = sqlx::query(sql).execute(&pool).await;

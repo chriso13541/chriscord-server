@@ -11,28 +11,31 @@ use crate::{db, state::AppState};
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
+#[derive(Serialize, Deserialize, Clone, Default)]
+pub struct Attachment {
+    pub url:  String,
+    pub name: String,
+    pub mime: String,
+}
+
 #[derive(Serialize, Deserialize, Clone)]
 pub struct ChatMessage {
-    pub id:              String,
-    pub board_id:        String,
-    pub username:        String,
-    pub content:         String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub attachment_url:  Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub attachment_name: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub attachment_mime: Option<String>,
-    pub edited:          bool,
-    pub created_at:      String,
+    pub id:          String,
+    pub board_id:    String,
+    pub username:    String,
+    pub content:     String,
+    /// Multi-attachment support. Replaces the old single attachment_url/name/mime columns.
+    /// Old messages with the single columns are migrated on read via row_to_msg.
+    #[serde(default)]
+    pub attachments: Vec<Attachment>,
+    pub edited:      bool,
+    pub created_at:  String,
 }
 
 #[derive(Deserialize)]
 pub struct SendMsgReq {
-    pub content:         Option<String>,
-    pub attachment_url:  Option<String>,
-    pub attachment_name: Option<String>,
-    pub attachment_mime: Option<String>,
+    pub content:     Option<String>,
+    pub attachments: Option<Vec<Attachment>>,
 }
 
 #[derive(Deserialize)]
@@ -41,41 +44,54 @@ pub struct EditMsgReq {
 }
 
 type ApiErr = (StatusCode, Json<serde_json::Value>);
-
-fn db_err() -> ApiErr {
-    (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({ "error": "DB error" })))
-}
-fn unauth() -> ApiErr {
-    (StatusCode::UNAUTHORIZED, Json(serde_json::json!({ "error": "Unauthorized" })))
-}
-fn not_found() -> ApiErr {
-    (StatusCode::NOT_FOUND, Json(serde_json::json!({ "error": "Message not found" })))
-}
-fn forbidden() -> ApiErr {
-    (StatusCode::FORBIDDEN, Json(serde_json::json!({ "error": "You can only edit/delete your own messages" })))
-}
+fn db_err()   -> ApiErr { (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({ "error": "DB error" }))) }
+fn unauth()   -> ApiErr { (StatusCode::UNAUTHORIZED,          Json(serde_json::json!({ "error": "Unauthorized" }))) }
+fn not_found()-> ApiErr { (StatusCode::NOT_FOUND,             Json(serde_json::json!({ "error": "Message not found" }))) }
+fn forbidden()-> ApiErr { (StatusCode::FORBIDDEN,             Json(serde_json::json!({ "error": "You can only edit/delete your own messages" }))) }
 
 fn token_from(h: &HeaderMap) -> &str {
     h.get("X-Session-Token").and_then(|v| v.to_str().ok()).unwrap_or("")
 }
 
+/// Convert a DB row to a ChatMessage, handling both old single-attachment and
+/// new multi-attachment (JSON) rows transparently.
 pub fn row_to_msg(r: &sqlx::sqlite::SqliteRow) -> ChatMessage {
+    // Try new `attachments` JSON column first
+    let attachments: Vec<Attachment> = r
+        .try_get::<Option<String>, _>("attachments")
+        .ok()
+        .flatten()
+        .and_then(|json| serde_json::from_str(&json).ok())
+        .unwrap_or_else(|| {
+            // Fall back to old single-attachment columns for backward compat
+            let url:  Option<String> = r.try_get("attachment_url").ok().flatten();
+            let name: Option<String> = r.try_get("attachment_name").ok().flatten();
+            let mime: Option<String> = r.try_get("attachment_mime").ok().flatten();
+            match url {
+                Some(u) => vec![Attachment {
+                    url:  u,
+                    name: name.unwrap_or_default(),
+                    mime: mime.unwrap_or_default(),
+                }],
+                None => vec![],
+            }
+        });
+
     ChatMessage {
-        id:              r.get("id"),
-        board_id:        r.get("board_id"),
-        username:        r.get("username"),
-        content:         r.get("content"),
-        attachment_url:  r.get("attachment_url"),
-        attachment_name: r.get("attachment_name"),
-        attachment_mime: r.get("attachment_mime"),
-        edited:          r.get::<i64, _>("edited") != 0,
-        created_at:      r.get("created_at"),
+        id:          r.get("id"),
+        board_id:    r.get("board_id"),
+        username:    r.get("username"),
+        content:     r.get("content"),
+        attachments,
+        edited:      r.try_get::<i64, _>("edited").unwrap_or(0) != 0,
+        created_at:  r.get("created_at"),
     }
 }
 
-const MSG_QUERY: &str =
+const SELECT: &str =
     "SELECT id, board_id, username, content,
-            attachment_url, attachment_name, attachment_mime, edited, created_at
+            attachment_url, attachment_name, attachment_mime,
+            attachments, edited, created_at
      FROM messages";
 
 // ── Handlers ──────────────────────────────────────────────────────────────────
@@ -88,7 +104,7 @@ pub async fn get_messages(
     db::verify_token(&s.pool, token_from(&headers)).await
         .map_err(|_| db_err())?.ok_or_else(unauth)?;
 
-    let rows = sqlx::query(&format!("{} WHERE board_id = ? ORDER BY created_at ASC LIMIT 100", MSG_QUERY))
+    let rows = sqlx::query(&format!("{} WHERE board_id = ? ORDER BY created_at ASC LIMIT 100", SELECT))
         .bind(&board_id).fetch_all(&s.pool).await.map_err(|_| db_err())?;
 
     Ok(Json(rows.iter().map(row_to_msg).collect()))
@@ -103,32 +119,26 @@ pub async fn post_message(
     let username = db::verify_token(&s.pool, token_from(&headers)).await
         .map_err(|_| db_err())?.ok_or_else(unauth)?;
 
-    let content = body.content.as_deref().unwrap_or("").trim().to_string();
-    if content.is_empty() && body.attachment_url.is_none() {
+    let content     = body.content.as_deref().unwrap_or("").trim().to_string();
+    let attachments = body.attachments.unwrap_or_default();
+
+    if content.is_empty() && attachments.is_empty() {
         return Err((StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": "Must have content or attachment" }))));
     }
 
-    let id  = uuid::Uuid::new_v4().to_string();
-    let now = chrono::Utc::now().to_rfc3339();
+    let id              = uuid::Uuid::new_v4().to_string();
+    let now             = chrono::Utc::now().to_rfc3339();
+    let attachments_json = serde_json::to_string(&attachments).unwrap_or_default();
 
     sqlx::query(
-        "INSERT INTO messages (id, board_id, username, content,
-            attachment_url, attachment_name, attachment_mime, edited, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?)",
+        "INSERT INTO messages (id, board_id, username, content, attachments, edited, created_at)
+         VALUES (?, ?, ?, ?, ?, 0, ?)",
     )
     .bind(&id).bind(&board_id).bind(&username).bind(&content)
-    .bind(&body.attachment_url).bind(&body.attachment_name).bind(&body.attachment_mime)
-    .bind(&now)
+    .bind(&attachments_json).bind(&now)
     .execute(&s.pool).await.map_err(|_| db_err())?;
 
-    let msg = ChatMessage {
-        id, board_id, username, content,
-        attachment_url: body.attachment_url,
-        attachment_name: body.attachment_name,
-        attachment_mime: body.attachment_mime,
-        edited: false,
-        created_at: now,
-    };
+    let msg = ChatMessage { id, board_id, username, content, attachments, edited: false, created_at: now };
     let _ = s.tx.send(serde_json::json!({ "type": "message", "data": msg }).to_string());
     Ok(Json(msg))
 }
@@ -147,28 +157,19 @@ pub async fn edit_message(
         return Err((StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": "Content cannot be empty" }))));
     }
 
-    // Verify message exists and belongs to this user
     let row = sqlx::query("SELECT username, board_id FROM messages WHERE id = ?")
         .bind(&id).fetch_optional(&s.pool).await.map_err(|_| db_err())?
         .ok_or_else(not_found)?;
 
-    if row.get::<String, _>("username") != username {
-        return Err(forbidden());
-    }
+    if row.get::<String, _>("username") != username { return Err(forbidden()); }
     let board_id: String = row.get("board_id");
 
     sqlx::query("UPDATE messages SET content = ?, edited = 1 WHERE id = ?")
-        .bind(&content).bind(&id)
-        .execute(&s.pool).await.map_err(|_| db_err())?;
+        .bind(&content).bind(&id).execute(&s.pool).await.map_err(|_| db_err())?;
 
-    let payload = serde_json::json!({
-        "type":     "message_edit",
-        "id":       id,
-        "board_id": board_id,
-        "content":  content,
-    });
-    let _ = s.tx.send(payload.to_string());
-
+    let _ = s.tx.send(serde_json::json!({
+        "type": "message_edit", "id": id, "board_id": board_id, "content": content,
+    }).to_string());
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
@@ -184,20 +185,13 @@ pub async fn delete_message(
         .bind(&id).fetch_optional(&s.pool).await.map_err(|_| db_err())?
         .ok_or_else(not_found)?;
 
-    if row.get::<String, _>("username") != username {
-        return Err(forbidden());
-    }
+    if row.get::<String, _>("username") != username { return Err(forbidden()); }
     let board_id: String = row.get("board_id");
 
-    sqlx::query("DELETE FROM messages WHERE id = ?")
-        .bind(&id).execute(&s.pool).await.map_err(|_| db_err())?;
+    sqlx::query("DELETE FROM messages WHERE id = ?").bind(&id).execute(&s.pool).await.map_err(|_| db_err())?;
 
-    let payload = serde_json::json!({
-        "type":     "message_delete",
-        "id":       id,
-        "board_id": board_id,
-    });
-    let _ = s.tx.send(payload.to_string());
-
+    let _ = s.tx.send(serde_json::json!({
+        "type": "message_delete", "id": id, "board_id": board_id,
+    }).to_string());
     Ok(Json(serde_json::json!({ "ok": true })))
 }
