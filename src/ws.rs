@@ -140,7 +140,7 @@ fn broadcast_users(state: &Arc<AppState>) {
 }
 
 async fn load_history(state: &Arc<AppState>, board_id: &str) -> Vec<serde_json::Value> {
-    let rows = sqlx::query(
+    let rows = match sqlx::query(
         "SELECT id, board_id, username, content,
                 attachment_url, attachment_name, attachment_mime, created_at
          FROM messages WHERE board_id = ?
@@ -148,11 +148,16 @@ async fn load_history(state: &Arc<AppState>, board_id: &str) -> Vec<serde_json::
     )
     .bind(board_id)
     .fetch_all(&state.pool)
-    .await
-    .unwrap_or_default();
+    .await {
+        Ok(r)  => r,
+        Err(e) => {
+            tracing::error!("load_history query failed: {}", e);
+            return vec![];
+        }
+    };
 
     rows.iter()
-        .map(|r| serde_json::to_value(row_to_msg(r)).unwrap_or_default())
+        .filter_map(|r| serde_json::to_value(row_to_msg(r)).ok())
         .collect()
 }
 

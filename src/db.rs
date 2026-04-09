@@ -56,11 +56,14 @@ pub async fn init() -> Result<SqlitePool, sqlx::Error> {
 
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS messages (
-            id         TEXT PRIMARY KEY,
-            board_id   TEXT NOT NULL,
-            username   TEXT NOT NULL,
-            content    TEXT NOT NULL,
-            created_at TEXT NOT NULL
+            id              TEXT PRIMARY KEY,
+            board_id        TEXT NOT NULL,
+            username        TEXT NOT NULL,
+            content         TEXT NOT NULL,
+            attachment_url  TEXT,
+            attachment_name TEXT,
+            attachment_mime TEXT,
+            created_at      TEXT NOT NULL
         )",
     )
     .execute(&pool)
@@ -72,6 +75,19 @@ pub async fn init() -> Result<SqlitePool, sqlx::Error> {
     )
     .execute(&pool)
     .await?;
+
+    // ── Migrations ────────────────────────────────────────────────────────────
+    // Try to add new columns to existing tables. SQLite returns an error if the
+    // column already exists — we silently ignore those so this is always safe to
+    // run against both fresh and older databases.
+    let migrations: &[&str] = &[
+        "ALTER TABLE messages ADD COLUMN attachment_url  TEXT",
+        "ALTER TABLE messages ADD COLUMN attachment_name TEXT",
+        "ALTER TABLE messages ADD COLUMN attachment_mime TEXT",
+    ];
+    for sql in migrations {
+        let _ = sqlx::query(sql).execute(&pool).await; // ignore "duplicate column" error
+    }
 
     Ok(pool)
 }
