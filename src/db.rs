@@ -156,3 +156,13 @@ pub async fn verify_token(
             .map(|r| r.get("username")),
     )
 }
+
+/// Returns all distinct usernames that have ever joined this server.
+pub async fn all_known_users(pool: &SqlitePool) -> Result<Vec<String>, sqlx::Error> {
+    let rows = sqlx::query(
+        "SELECT DISTINCT username FROM sessions ORDER BY username ASC"
+    )
+    .fetch_all(pool)
+    .await?;
+    Ok(rows.iter().map(|r| r.get("username")).collect())
+}

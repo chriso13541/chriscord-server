@@ -7,7 +7,6 @@ use axum::{
 };
 use futures_util::{SinkExt, StreamExt};
 use serde::Deserialize;
-use sqlx::Row;
 use std::sync::Arc;
 
 use crate::{db, messages::row_to_msg, state::AppState};
@@ -131,12 +130,26 @@ async fn handle_socket(socket: WebSocket, token: String, state: Arc<AppState>) {
 }
 
 fn broadcast_users(state: &Arc<AppState>) {
-    let users: Vec<String> = {
+    let online: Vec<String> = {
         let online = state.online.lock().unwrap();
         online.keys().cloned().collect()
     };
-    let payload = serde_json::json!({ "type": "users", "users": users });
-    let _ = state.tx.send(payload.to_string());
+
+    // Spawn a task to fetch all known users from DB and broadcast.
+    // We can't block here (sync fn), so fire-and-forget.
+    let state = Arc::clone(state);
+    tokio::spawn(async move {
+        let all = crate::db::all_known_users(&state.pool)
+            .await
+            .unwrap_or_default();
+
+        let payload = serde_json::json!({
+            "type":   "users",
+            "online": online,
+            "all":    all,
+        });
+        let _ = state.tx.send(payload.to_string());
+    });
 }
 
 async fn load_history(state: &Arc<AppState>, board_id: &str) -> Vec<serde_json::Value> {
