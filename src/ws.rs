@@ -68,6 +68,7 @@ async fn handle_socket(socket: WebSocket, token: String, state: Arc<AppState>) {
                                     let history = load_history(&state, &bid).await;
                                     let payload = serde_json::json!({
                                         "type":     "history",
+                                        "board_id": &bid,
                                         "messages": history,
                                     });
                                     if sink.send(Message::Text(payload.to_string())).await.is_err() {
