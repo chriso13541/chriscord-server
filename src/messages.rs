@@ -9,20 +9,27 @@ use std::sync::Arc;
 
 use crate::{db, state::AppState};
 
-// ── Types ─────────────────────────────────────────────────────────────────────
-
 #[derive(Serialize, Deserialize, Clone)]
 pub struct ChatMessage {
-    pub id:         String,
-    pub board_id:   String,
-    pub username:   String,
-    pub content:    String,
-    pub created_at: String,
+    pub id:              String,
+    pub board_id:        String,
+    pub username:        String,
+    pub content:         String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub attachment_url:  Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub attachment_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub attachment_mime: Option<String>,
+    pub created_at:      String,
 }
 
 #[derive(Deserialize)]
 pub struct SendMsgReq {
-    pub content: String,
+    pub content:         Option<String>,
+    pub attachment_url:  Option<String>,
+    pub attachment_name: Option<String>,
+    pub attachment_mime: Option<String>,
 }
 
 type ApiErr = (StatusCode, Json<serde_json::Value>);
@@ -32,94 +39,75 @@ fn db_err() -> ApiErr {
 }
 
 fn token_from(h: &HeaderMap) -> &str {
-    h.get("X-Session-Token")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("")
+    h.get("X-Session-Token").and_then(|v| v.to_str().ok()).unwrap_or("")
 }
 
-// ── Handlers ──────────────────────────────────────────────────────────────────
+pub fn row_to_msg(r: &sqlx::sqlite::SqliteRow) -> ChatMessage {
+    ChatMessage {
+        id:              r.get("id"),
+        board_id:        r.get("board_id"),
+        username:        r.get("username"),
+        content:         r.get("content"),
+        attachment_url:  r.get("attachment_url"),
+        attachment_name: r.get("attachment_name"),
+        attachment_mime: r.get("attachment_mime"),
+        created_at:      r.get("created_at"),
+    }
+}
 
-/// GET /api/boards/:id/messages — last 100 messages, oldest first.
 pub async fn get_messages(
-    headers: HeaderMap,
+    headers:        HeaderMap,
     Path(board_id): Path<String>,
-    State(s): State<Arc<AppState>>,
+    State(s):       State<Arc<AppState>>,
 ) -> Result<Json<Vec<ChatMessage>>, ApiErr> {
     db::verify_token(&s.pool, token_from(&headers))
-        .await
-        .map_err(|_| db_err())?
-        .ok_or_else(|| {
-            (StatusCode::UNAUTHORIZED, Json(serde_json::json!({ "error": "Unauthorized" })))
-        })?;
+        .await.map_err(|_| db_err())?
+        .ok_or_else(|| (StatusCode::UNAUTHORIZED, Json(serde_json::json!({ "error": "Unauthorized" }))))?;
 
     let rows = sqlx::query(
-        "SELECT id, board_id, username, content, created_at
-         FROM messages
-         WHERE board_id = ?
-         ORDER BY created_at ASC
-         LIMIT 100",
-    )
-    .bind(&board_id)
-    .fetch_all(&s.pool)
-    .await
-    .map_err(|_| db_err())?;
+        "SELECT id, board_id, username, content,
+                attachment_url, attachment_name, attachment_mime, created_at
+         FROM messages WHERE board_id = ? ORDER BY created_at ASC LIMIT 100",
+    ).bind(&board_id).fetch_all(&s.pool).await.map_err(|_| db_err())?;
 
-    Ok(Json(
-        rows.iter()
-            .map(|r| ChatMessage {
-                id:         r.get("id"),
-                board_id:   r.get("board_id"),
-                username:   r.get("username"),
-                content:    r.get("content"),
-                created_at: r.get("created_at"),
-            })
-            .collect(),
-    ))
+    Ok(Json(rows.iter().map(row_to_msg).collect()))
 }
 
-/// POST /api/boards/:id/messages — send a message via REST (also broadcasts over WS).
-/// The WS handler also writes messages; this endpoint is for REST clients or fallback.
 pub async fn post_message(
-    headers: HeaderMap,
+    headers:        HeaderMap,
     Path(board_id): Path<String>,
-    State(s): State<Arc<AppState>>,
-    Json(body): Json<SendMsgReq>,
+    State(s):       State<Arc<AppState>>,
+    Json(body):     Json<SendMsgReq>,
 ) -> Result<Json<ChatMessage>, ApiErr> {
     let username = db::verify_token(&s.pool, token_from(&headers))
-        .await
-        .map_err(|_| db_err())?
-        .ok_or_else(|| {
-            (StatusCode::UNAUTHORIZED, Json(serde_json::json!({ "error": "Unauthorized" })))
-        })?;
+        .await.map_err(|_| db_err())?
+        .ok_or_else(|| (StatusCode::UNAUTHORIZED, Json(serde_json::json!({ "error": "Unauthorized" }))))?;
 
-    let content = body.content.trim().to_string();
-    if content.is_empty() || content.len() > 2000 {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({ "error": "Content must be 1–2000 characters" })),
-        ));
+    let content = body.content.as_deref().unwrap_or("").trim().to_string();
+    if content.is_empty() && body.attachment_url.is_none() {
+        return Err((StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": "Must have content or attachment" }))));
     }
 
     let id  = uuid::Uuid::new_v4().to_string();
     let now = chrono::Utc::now().to_rfc3339();
 
     sqlx::query(
-        "INSERT INTO messages (id, board_id, username, content, created_at) VALUES (?, ?, ?, ?, ?)",
+        "INSERT INTO messages (id, board_id, username, content,
+            attachment_url, attachment_name, attachment_mime, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
     )
-    .bind(&id)
-    .bind(&board_id)
-    .bind(&username)
-    .bind(&content)
+    .bind(&id).bind(&board_id).bind(&username).bind(&content)
+    .bind(&body.attachment_url).bind(&body.attachment_name).bind(&body.attachment_mime)
     .bind(&now)
-    .execute(&s.pool)
-    .await
-    .map_err(|_| db_err())?;
+    .execute(&s.pool).await.map_err(|_| db_err())?;
 
-    let msg = ChatMessage { id, board_id, username, content, created_at: now };
-
-    // Broadcast to all WS connections
-    let payload = serde_json::json!({ "type": "message", "data": msg });
-    let _ = s.tx.send(payload.to_string());
-
+    let msg = ChatMessage {
+        id, board_id, username, content,
+        attachment_url:  body.attachment_url,
+        attachment_name: body.attachment_name,
+        attachment_mime: body.attachment_mime,
+        created_at: now,
+    };
+    let _ = s.tx.send(serde_json::json!({ "type": "message", "data": msg }).to_string());
     Ok(Json(msg))
 }

@@ -10,129 +10,141 @@ use serde::Deserialize;
 use sqlx::Row;
 use std::sync::Arc;
 
-use crate::{db, state::AppState};
-
-// ── Protocol types ────────────────────────────────────────────────────────────
+use crate::{db, messages::row_to_msg, state::AppState};
 
 #[derive(Deserialize)]
 pub struct WsQuery {
     pub token: String,
 }
 
-/// Messages sent from the client to the server over WS.
 #[derive(Deserialize)]
 struct ClientMsg {
     #[serde(rename = "type")]
     msg_type: String,
     board_id: Option<String>,
     content:  Option<String>,
+    // attachment fields (sent together with content)
+    attachment_url:  Option<String>,
+    attachment_name: Option<String>,
+    attachment_mime: Option<String>,
 }
 
-// ── Handler ───────────────────────────────────────────────────────────────────
-
 pub async fn ws_handler(
-    ws:                WebSocketUpgrade,
-    Query(query):      Query<WsQuery>,
-    State(state):      State<Arc<AppState>>,
+    ws:           WebSocketUpgrade,
+    Query(query): Query<WsQuery>,
+    State(state): State<Arc<AppState>>,
 ) -> impl IntoResponse {
     ws.on_upgrade(move |socket| handle_socket(socket, query.token, state))
 }
 
 async fn handle_socket(socket: WebSocket, token: String, state: Arc<AppState>) {
-    // Verify the session token before doing anything
     let username = match db::verify_token(&state.pool, &token).await {
         Ok(Some(u)) => u,
-        _ => return, // Invalid token — just close
+        _ => return,
     };
+
+    // Register as online
+    {
+        let mut online = state.online.lock().unwrap();
+        *online.entry(username.clone()).or_insert(0) += 1;
+    }
+    broadcast_users(&state);
 
     let mut rx = state.tx.subscribe();
     let mut subscribed_board: Option<String> = None;
-
-    // Split the socket so we can independently receive from the client and
-    // send broadcasts without fighting the borrow checker.
     let (mut sink, mut stream) = socket.split();
 
     loop {
         tokio::select! {
-            // ── Inbound: message from this client ─────────────────────────
             msg = stream.next() => {
                 match msg {
                     Some(Ok(Message::Text(text))) => {
-                        let Ok(cm) = serde_json::from_str::<ClientMsg>(&text) else {
-                            continue;
-                        };
+                        let Ok(cm) = serde_json::from_str::<ClientMsg>(&text) else { continue };
                         match cm.msg_type.as_str() {
                             "subscribe" => {
                                 if let Some(bid) = cm.board_id {
-                                    // Send message history immediately on subscribe
                                     let history = load_history(&state, &bid).await;
                                     let payload = serde_json::json!({
-                                        "type":     "history",
+                                        "type": "history",
                                         "board_id": &bid,
                                         "messages": history,
                                     });
-                                    if sink.send(Message::Text(payload.to_string())).await.is_err() {
-                                        break;
-                                    }
+                                    if sink.send(Message::Text(payload.to_string())).await.is_err() { break; }
                                     subscribed_board = Some(bid);
                                 }
                             }
                             "message" => {
-                                if let (Some(bid), Some(content)) = (cm.board_id, cm.content) {
-                                    let content = content.trim().to_string();
-                                    if !content.is_empty() && content.len() <= 2000 {
-                                        save_and_broadcast(&state, &bid, &username, &content).await;
+                                if let Some(bid) = cm.board_id {
+                                    let content = cm.content.as_deref().unwrap_or("").trim().to_string();
+                                    let has_attachment = cm.attachment_url.is_some();
+                                    if !content.is_empty() || has_attachment {
+                                        save_and_broadcast(
+                                            &state, &bid, &username, &content,
+                                            cm.attachment_url,
+                                            cm.attachment_name,
+                                            cm.attachment_mime,
+                                        ).await;
                                     }
                                 }
                             }
                             _ => {}
                         }
                     }
-                    // Client disconnected or sent a close frame
                     None | Some(Ok(Message::Close(_))) => break,
                     Some(Err(_)) => break,
                     _ => {}
                 }
             }
-
-            // ── Outbound: message from broadcast channel ───────────────────
             result = rx.recv() => {
                 match result {
                     Ok(bcast) => {
-                        // Only forward if the client is subscribed to this board
-                        if let Some(ref bid) = subscribed_board {
-                            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&bcast) {
-                                let matches = v["data"]["board_id"]
-                                    .as_str()
-                                    .map(|id| id == bid)
-                                    .unwrap_or(false);
-                                if matches {
-                                    if sink.send(Message::Text(bcast)).await.is_err() {
-                                        break;
-                                    }
+                        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&bcast) {
+                            // Always forward user-list updates; filter messages by board
+                            let fwd = match v["type"].as_str() {
+                                Some("users") => true,
+                                Some("message") => {
+                                    subscribed_board.as_deref()
+                                        .map(|bid| v["data"]["board_id"].as_str() == Some(bid))
+                                        .unwrap_or(false)
                                 }
+                                _ => false,
+                            };
+                            if fwd {
+                                if sink.send(Message::Text(bcast)).await.is_err() { break; }
                             }
                         }
                     }
-                    // Lagged — receiver fell behind; skip and continue
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
-                    // Channel closed (server shutting down)
                     Err(_) => break,
                 }
             }
         }
     }
+
+    // Unregister — decrement and remove if last connection
+    {
+        let mut online = state.online.lock().unwrap();
+        let count = online.entry(username.clone()).or_insert(0);
+        if *count <= 1 { online.remove(&username); } else { *count -= 1; }
+    }
+    broadcast_users(&state);
 }
 
-// ── Helpers ───────────────────────────────────────────────────────────────────
+fn broadcast_users(state: &Arc<AppState>) {
+    let users: Vec<String> = {
+        let online = state.online.lock().unwrap();
+        online.keys().cloned().collect()
+    };
+    let payload = serde_json::json!({ "type": "users", "users": users });
+    let _ = state.tx.send(payload.to_string());
+}
 
 async fn load_history(state: &Arc<AppState>, board_id: &str) -> Vec<serde_json::Value> {
     let rows = sqlx::query(
-        "SELECT id, board_id, username, content, created_at
-         FROM messages
-         WHERE board_id = ?
-         ORDER BY created_at ASC
-         LIMIT 100",
+        "SELECT id, board_id, username, content,
+                attachment_url, attachment_name, attachment_mime, created_at
+         FROM messages WHERE board_id = ?
+         ORDER BY created_at ASC LIMIT 100",
     )
     .bind(board_id)
     .fetch_all(&state.pool)
@@ -140,47 +152,39 @@ async fn load_history(state: &Arc<AppState>, board_id: &str) -> Vec<serde_json::
     .unwrap_or_default();
 
     rows.iter()
-        .map(|r| {
-            serde_json::json!({
-                "id":         r.get::<String, _>("id"),
-                "board_id":   r.get::<String, _>("board_id"),
-                "username":   r.get::<String, _>("username"),
-                "content":    r.get::<String, _>("content"),
-                "created_at": r.get::<String, _>("created_at"),
-            })
-        })
+        .map(|r| serde_json::to_value(row_to_msg(r)).unwrap_or_default())
         .collect()
 }
 
 async fn save_and_broadcast(
-    state:    &Arc<AppState>,
-    board_id: &str,
-    username: &str,
-    content:  &str,
+    state:           &Arc<AppState>,
+    board_id:        &str,
+    username:        &str,
+    content:         &str,
+    attachment_url:  Option<String>,
+    attachment_name: Option<String>,
+    attachment_mime: Option<String>,
 ) {
     let id  = uuid::Uuid::new_v4().to_string();
     let now = chrono::Utc::now().to_rfc3339();
 
     let _ = sqlx::query(
-        "INSERT INTO messages (id, board_id, username, content, created_at) VALUES (?, ?, ?, ?, ?)",
+        "INSERT INTO messages (id, board_id, username, content,
+            attachment_url, attachment_name, attachment_mime, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
     )
-    .bind(&id)
-    .bind(board_id)
-    .bind(username)
-    .bind(content)
+    .bind(&id).bind(board_id).bind(username).bind(content)
+    .bind(&attachment_url).bind(&attachment_name).bind(&attachment_mime)
     .bind(&now)
     .execute(&state.pool)
     .await;
 
-    let payload = serde_json::json!({
-        "type": "message",
-        "data": {
-            "id":         id,
-            "board_id":   board_id,
-            "username":   username,
-            "content":    content,
-            "created_at": now,
-        }
-    });
+    let msg = crate::messages::ChatMessage {
+        id, board_id: board_id.to_string(), username: username.to_string(),
+        content: content.to_string(),
+        attachment_url, attachment_name, attachment_mime,
+        created_at: now,
+    };
+    let payload = serde_json::json!({ "type": "message", "data": msg });
     let _ = state.tx.send(payload.to_string());
 }
