@@ -9,7 +9,7 @@ use futures_util::{SinkExt, StreamExt};
 use serde::Deserialize;
 use std::sync::Arc;
 
-use crate::{db, messages::{row_to_msg, Attachment}, state::AppState};
+use crate::{db, messages::{row_to_msg, Attachment, HISTORY_PAGE}, state::AppState};
 
 #[derive(Deserialize)]
 pub struct WsQuery { pub token: String }
@@ -120,15 +120,16 @@ fn broadcast_users(state: &Arc<AppState>) {
 }
 
 async fn load_history(state: &Arc<AppState>, board_id: &str) -> Vec<serde_json::Value> {
-    let rows = match sqlx::query(
+    let mut rows = match sqlx::query(
         "SELECT id, board_id, username, content,
                 attachment_url, attachment_name, attachment_mime,
                 attachments, edited, created_at
-         FROM messages WHERE board_id = ? ORDER BY created_at ASC LIMIT 100",
-    ).bind(board_id).fetch_all(&state.pool).await {
+         FROM messages WHERE board_id = ? ORDER BY id DESC LIMIT ?",
+    ).bind(board_id).bind(HISTORY_PAGE).fetch_all(&state.pool).await {
         Ok(r) => r,
         Err(e) => { tracing::error!("load_history: {}", e); return vec![]; }
     };
+    rows.reverse();
     rows.iter().filter_map(|r| serde_json::to_value(row_to_msg(r)).ok()).collect()
 }
 

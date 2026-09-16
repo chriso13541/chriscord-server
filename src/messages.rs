@@ -1,5 +1,5 @@
 use axum::{
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::{HeaderMap, StatusCode},
     Json,
 };
@@ -8,6 +8,27 @@ use sqlx::Row;
 use std::sync::Arc;
 
 use crate::{db, state::AppState};
+
+// Page size for message history, both the initial page (ws.rs's load_history)
+// and each "load older" page below. Kept as one constant so both delivery
+// paths always agree; the client mirrors this number (HISTORY_PAGE in
+// index.html) to know whether a page it received was the last one — if you
+// change this, update that too.
+pub const HISTORY_PAGE: i64 = 50;
+// Cap on search results per query — a plain LIKE scan with no way to rank
+// relevance, so this just bounds worst-case response size, not "top N".
+const SEARCH_LIMIT: usize = 50;
+
+#[derive(Deserialize)]
+pub struct MessagesQuery {
+    /// Message id (UUIDv7) to page backward from. Omitted = most recent page.
+    pub before: Option<String>,
+}
+
+#[derive(Deserialize)]
+pub struct SearchQuery {
+    pub q: String,
+}
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -30,6 +51,18 @@ pub struct ChatMessage {
     pub attachments: Vec<Attachment>,
     pub edited:      bool,
     pub created_at:  String,
+}
+
+/// A ChatMessage plus which board (and its room) it came from — only
+/// meaningful once search spans every channel instead of being scoped to
+/// whichever one you're currently viewing. #[serde(flatten)] keeps the JSON
+/// shape identical to ChatMessage with two extra fields, rather than nesting.
+#[derive(Serialize)]
+pub struct SearchResult {
+    #[serde(flatten)]
+    pub message:    ChatMessage,
+    pub board_name: String,
+    pub room_id:    String,
 }
 
 #[derive(Deserialize)]
@@ -94,20 +127,133 @@ const SELECT: &str =
             attachments, edited, created_at
      FROM messages";
 
+// Same columns as SELECT above, plus the joined board's name and room —
+// used only by search_messages, which spans every board.
+const SEARCH_SELECT: &str =
+    "SELECT m.id, m.board_id, m.username, m.content,
+            m.attachment_url, m.attachment_name, m.attachment_mime,
+            m.attachments, m.edited, m.created_at,
+            b.name AS board_name, b.room_id AS room_id
+     FROM messages m JOIN boards b ON m.board_id = b.id";
+
+fn row_to_search_result(r: &sqlx::sqlite::SqliteRow) -> SearchResult {
+    SearchResult {
+        message:    row_to_msg(r),
+        board_name: r.get("board_name"),
+        room_id:    r.get("room_id"),
+    }
+}
+
 // ── Handlers ──────────────────────────────────────────────────────────────────
 
 pub async fn get_messages(
     headers:        HeaderMap,
     Path(board_id): Path<String>,
+    Query(q):       Query<MessagesQuery>,
     State(s):       State<Arc<AppState>>,
 ) -> Result<Json<Vec<ChatMessage>>, ApiErr> {
     db::verify_token(&s.pool, token_from(&headers)).await
         .map_err(|_| db_err())?.ok_or_else(unauth)?;
 
-    let rows = sqlx::query(&format!("{} WHERE board_id = ? ORDER BY created_at ASC LIMIT 100", SELECT))
-        .bind(&board_id).fetch_all(&s.pool).await.map_err(|_| db_err())?;
+    // Ordering by id (UUIDv7) rather than created_at: UUIDv7 embeds its
+    // timestamp as the leading bytes specifically so lexicographic string
+    // order matches chronological order, but unlike created_at it's also
+    // guaranteed unique — safe to use as a paging cursor with no risk of two
+    // messages landing on the same instant and one getting skipped or
+    // duplicated across pages.
+    let mut rows = match &q.before {
+        Some(cursor) => sqlx::query(
+            &format!("{} WHERE board_id = ? AND id < ? ORDER BY id DESC LIMIT ?", SELECT)
+        ).bind(&board_id).bind(cursor).bind(HISTORY_PAGE)
+         .fetch_all(&s.pool).await.map_err(|_| db_err())?,
+        None => sqlx::query(
+            &format!("{} WHERE board_id = ? ORDER BY id DESC LIMIT ?", SELECT)
+        ).bind(&board_id).bind(HISTORY_PAGE)
+         .fetch_all(&s.pool).await.map_err(|_| db_err())?,
+    };
+    // Rows come back newest-first (for an efficient indexed LIMIT); flip
+    // back to chronological order before handing them to the client.
+    rows.reverse();
 
     Ok(Json(rows.iter().map(row_to_msg).collect()))
+}
+
+/// Searches every board on this host, not just one channel — "rooms" here
+/// are Discord-style categories inside a single server, not separate
+/// joinable spaces, so a server-wide search is the natural default. Per-
+/// channel scoping comes back later as the in: filter, applied on top of
+/// this same query rather than as a separate endpoint.
+pub async fn search_messages(
+    headers:  HeaderMap,
+    Query(q): Query<SearchQuery>,
+    State(s): State<Arc<AppState>>,
+) -> Result<Json<Vec<SearchResult>>, ApiErr> {
+    db::verify_token(&s.pool, token_from(&headers)).await
+        .map_err(|_| db_err())?.ok_or_else(unauth)?;
+
+    let term = q.q.trim();
+    if term.is_empty() {
+        return Ok(Json(vec![]));
+    }
+    // Escape SQL LIKE wildcards in the user's query so someone searching for
+    // a literal "%" or "_" gets literal matches, not wildcard behaviour.
+    let escaped = term.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_");
+    let pattern = format!("%{}%", escaped);
+
+    // Stage 1: a cheap SQL substring pre-filter across every board. No
+    // index can serve a leading-wildcard LIKE, so this is a full scan of
+    // the host's messages every search — fine at thousands of messages;
+    // SQLite's FTS5 extension is the documented next step if that changes.
+    // No LIMIT here: stage 2 below can shrink the candidate set
+    // unpredictably (a substring hit isn't necessarily a whole-word hit),
+    // so truncating has to happen after filtering, not before.
+    let rows = sqlx::query(
+        &format!("{} WHERE m.content LIKE ? ESCAPE '\\' ORDER BY m.id DESC", SEARCH_SELECT)
+    ).bind(&pattern)
+     .fetch_all(&s.pool).await.map_err(|_| db_err())?;
+
+    // Stage 2: keep only messages where the term appears as a standalone
+    // word/phrase — bounded by non-alphanumeric characters or the string's
+    // edges — not merely as a substring. This is the whole reason searching
+    // "hi" shouldn't return a message that only says "this".
+    let mut matches: Vec<SearchResult> = rows.iter()
+        .map(row_to_search_result)
+        .filter(|r| contains_whole_word(&r.message.content, term))
+        .take(SEARCH_LIMIT)
+        .collect();
+    matches.reverse(); // newest-first -> chronological, matching get_messages
+
+    Ok(Json(matches))
+}
+
+/// True if `term` appears in `content` as a standalone word or phrase,
+/// rather than merely as a substring — "hi" matches a message that says
+/// "hi" but not one that only says "this". A match counts if the character
+/// immediately before and after it (if any) is not alphanumeric, so this
+/// also works for a multi-word term as an implicit phrase match (the words
+/// must be adjacent, in order) without needing separate quote syntax.
+/// ASCII-only case folding, matching the LIKE pre-filter's own case
+/// behaviour above (SQLite's default LIKE only case-folds ASCII).
+fn contains_whole_word(content: &str, term: &str) -> bool {
+    let content = content.to_ascii_lowercase();
+    let term = term.to_ascii_lowercase();
+    if term.is_empty() {
+        return false;
+    }
+    let mut start = 0usize;
+    while let Some(rel) = content[start..].find(term.as_str()) {
+        let pos = start + rel;
+        let before_ok = content[..pos].chars().next_back().map_or(true, |c| !c.is_alphanumeric());
+        let after_ok = content[pos + term.len()..].chars().next().map_or(true, |c| !c.is_alphanumeric());
+        if before_ok && after_ok {
+            return true;
+        }
+        // Advance past exactly one character (byte-length-safe for UTF-8) to
+        // look for the next occurrence rather than stopping at the first.
+        let advance = content[pos..].chars().next().map(|c| c.len_utf8()).unwrap_or(1);
+        start = pos + advance;
+    }
+    false
 }
 
 pub async fn post_message(

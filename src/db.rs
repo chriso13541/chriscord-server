@@ -87,6 +87,15 @@ pub async fn init() -> Result<SqlitePool, sqlx::Error> {
     .execute(&pool)
     .await?;
 
+    // Supports the cursor-based "load older messages" pagination in
+    // messages::get_messages / ws::load_history, which orders and filters by
+    // (board_id, id) rather than created_at.
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_messages_board_id ON messages (board_id, id)",
+    )
+    .execute(&pool)
+    .await?;
+
     // ── Migrations ────────────────────────────────────────────────────────────
     // Try to add new columns to existing tables. SQLite returns an error if the
     // column already exists — we silently ignore those so this is always safe to

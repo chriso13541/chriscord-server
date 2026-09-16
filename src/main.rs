@@ -69,6 +69,7 @@ async fn main() {
         .route("/api/rooms/:id/boards", get(rooms::list_boards))
         .route("/api/boards/:id/messages",
             get(messages::get_messages).post(messages::post_message))
+        .route("/api/search", get(messages::search_messages))
         .route("/api/messages/:id",
             patch(messages::edit_message).delete(messages::delete_message))
         .route("/api/upload", post(files::upload)
