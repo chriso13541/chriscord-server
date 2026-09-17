@@ -85,9 +85,7 @@ async fn handle_socket(socket: WebSocket, token: String, state: Arc<AppState>) {
                             let fwd = match v["type"].as_str() {
                                 Some("users") => true,
                                 Some("rooms_updated") => true,
-                                Some("message") => subscribed_board.as_deref()
-                                    .map(|bid| v["data"]["board_id"].as_str() == Some(bid))
-                                    .unwrap_or(false),
+                                Some("message") => true,
                                 Some("message_edit") | Some("message_delete") => subscribed_board.as_deref()
                                     .map(|bid| v["board_id"].as_str() == Some(bid))
                                     .unwrap_or(false),
