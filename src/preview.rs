@@ -59,7 +59,8 @@ pub async fn get_preview(Query(q): Query<PreviewQuery>) -> Result<Json<PreviewRe
                         .or_else(|| extract_meta(&body, "twitter:title"))
                         .or_else(|| extract_title(&body)),
         description: extract_meta(&body, "og:description")
-                        .or_else(|| extract_meta(&body, "twitter:description")),
+                        .or_else(|| extract_meta(&body, "twitter:description"))
+                        .or_else(|| extract_meta(&body, "description")),
         image:       extract_meta(&body, "og:image")
                         .or_else(|| extract_meta(&body, "twitter:image"))
                         .map(|img| resolve_image(&img, &url)),
