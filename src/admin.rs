@@ -146,6 +146,8 @@ pub async fn create_room(
     .await
     .map_err(|_| dberr())?;
 
+    let _ = s.tx.send(serde_json::json!({ "type": "rooms_updated" }).to_string());
+
     Ok(Json(serde_json::json!({ "id": id, "name": name })))
 }
 
@@ -200,6 +202,8 @@ pub async fn delete_room(
     sqlx::query("DELETE FROM boards WHERE room_id = ?").bind(&id).execute(&s.pool).await.ok();
     sqlx::query("DELETE FROM rooms WHERE id = ?").bind(&id).execute(&s.pool).await.ok();
 
+    let _ = s.tx.send(serde_json::json!({ "type": "rooms_updated" }).to_string());
+
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
@@ -242,6 +246,8 @@ pub async fn create_board(
     .await
     .map_err(|_| dberr())?;
 
+    let _ = s.tx.send(serde_json::json!({ "type": "rooms_updated" }).to_string());
+
     Ok(Json(serde_json::json!({ "id": id, "name": name })))
 }
 
@@ -255,6 +261,8 @@ pub async fn delete_board(
 
     sqlx::query("DELETE FROM messages WHERE board_id = ?").bind(&id).execute(&s.pool).await.ok();
     sqlx::query("DELETE FROM boards WHERE id = ?").bind(&id).execute(&s.pool).await.ok();
+
+    let _ = s.tx.send(serde_json::json!({ "type": "rooms_updated" }).to_string());
 
     Ok(Json(serde_json::json!({ "ok": true })))
 }

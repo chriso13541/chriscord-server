@@ -84,6 +84,7 @@ async fn handle_socket(socket: WebSocket, token: String, state: Arc<AppState>) {
                         if let Ok(v) = serde_json::from_str::<serde_json::Value>(&bcast) {
                             let fwd = match v["type"].as_str() {
                                 Some("users") => true,
+                                Some("rooms_updated") => true,
                                 Some("message") => subscribed_board.as_deref()
                                     .map(|bid| v["data"]["board_id"].as_str() == Some(bid))
                                     .unwrap_or(false),
