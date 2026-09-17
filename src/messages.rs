@@ -178,6 +178,45 @@ pub async fn get_messages(
     Ok(Json(rows.iter().map(row_to_msg).collect()))
 }
 
+/// Fetches a window of messages centered on a specific one — half the page
+/// size on either side. This is what makes "jump to message" from search
+/// practical: without it, reaching a message from months ago would mean
+/// paging backward through history one HISTORY_PAGE chunk at a time until
+/// stumbling onto it, which could be dozens of round trips. The target
+/// message's own id doesn't need to still exist as a row — the id < / <=
+/// comparisons work on the value regardless, so this degrades gracefully
+/// if the message was deleted after being found by search: the surrounding
+/// conversation still loads correctly, just with nothing to highlight.
+pub async fn get_messages_around(
+    headers:  HeaderMap,
+    Path((board_id, message_id)): Path<(String, String)>,
+    State(s): State<Arc<AppState>>,
+) -> Result<Json<Vec<ChatMessage>>, ApiErr> {
+    db::verify_token(&s.pool, token_from(&headers)).await
+        .map_err(|_| db_err())?.ok_or_else(unauth)?;
+
+    const AROUND_HALF: i64 = HISTORY_PAGE / 2;
+
+    // Up to and including the target, newest-first for an efficient LIMIT,
+    // then flipped back to chronological order.
+    let mut before_and_target = sqlx::query(
+        &format!("{} WHERE board_id = ? AND id <= ? ORDER BY id DESC LIMIT ?", SELECT)
+    ).bind(&board_id).bind(&message_id).bind(AROUND_HALF + 1)
+     .fetch_all(&s.pool).await.map_err(|_| db_err())?;
+    before_and_target.reverse();
+
+    // Strictly after the target, already in chronological order.
+    let after = sqlx::query(
+        &format!("{} WHERE board_id = ? AND id > ? ORDER BY id ASC LIMIT ?", SELECT)
+    ).bind(&board_id).bind(&message_id).bind(AROUND_HALF)
+     .fetch_all(&s.pool).await.map_err(|_| db_err())?;
+
+    let mut result: Vec<ChatMessage> = before_and_target.iter().map(row_to_msg).collect();
+    result.extend(after.iter().map(row_to_msg));
+
+    Ok(Json(result))
+}
+
 /// Searches every board on this host, not just one channel — "rooms" here
 /// are Discord-style categories inside a single server, not separate
 /// joinable spaces, so a server-wide search is the natural default. Per-
