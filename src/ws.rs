@@ -7,6 +7,7 @@ use axum::{
 };
 use futures_util::{SinkExt, StreamExt};
 use serde::Deserialize;
+use sqlx::Row;
 use std::sync::Arc;
 
 use crate::{db, messages::{row_to_msg, Attachment, HISTORY_PAGE}, state::AppState};
@@ -39,6 +40,7 @@ async fn handle_socket(socket: WebSocket, token: String, state: Arc<AppState>) {
 
     { let mut o = state.online.lock().unwrap(); *o.entry(username.clone()).or_insert(0) += 1; }
     broadcast_users(&state);
+    broadcast_voice_state(&state);
 
     let mut rx = state.tx.subscribe();
     let mut subscribed_board: Option<String> = None;
@@ -70,6 +72,29 @@ async fn handle_socket(socket: WebSocket, token: String, state: Arc<AppState>) {
                                     }
                                 }
                             }
+                            "join_voice" => {
+                                if let Some(bid) = cm.board_id {
+                                    // Validate server-side that this board actually belongs to a
+                                    // voice-type room, rather than trusting client UI gating alone.
+                                    let room_type: Option<String> = sqlx::query(
+                                        "SELECT rooms.room_type AS room_type
+                                         FROM boards JOIN rooms ON boards.room_id = rooms.id
+                                         WHERE boards.id = ?"
+                                    ).bind(&bid).fetch_optional(&state.pool).await.ok().flatten()
+                                     .map(|r| r.get("room_type"));
+                                    if room_type.as_deref() == Some("voice") {
+                                        // A user can only be in one voice channel at a time —
+                                        // inserting simply overwrites any previous entry, so
+                                        // moving between channels needs no separate leave step.
+                                        { state.voice.lock().unwrap().insert(username.clone(), bid); }
+                                        broadcast_voice_state(&state);
+                                    }
+                                }
+                            }
+                            "leave_voice" => {
+                                let was_in_voice = { state.voice.lock().unwrap().remove(&username).is_some() };
+                                if was_in_voice { broadcast_voice_state(&state); }
+                            }
                             _ => {}
                         }
                     }
@@ -85,6 +110,7 @@ async fn handle_socket(socket: WebSocket, token: String, state: Arc<AppState>) {
                             let fwd = match v["type"].as_str() {
                                 Some("users") => true,
                                 Some("rooms_updated") => true,
+                                Some("voice_state") => true,
                                 Some("message") => true,
                                 Some("message_edit") | Some("message_delete") => subscribed_board.as_deref()
                                     .map(|bid| v["board_id"].as_str() == Some(bid))
@@ -107,6 +133,24 @@ async fn handle_socket(socket: WebSocket, token: String, state: Arc<AppState>) {
         if *c <= 1 { o.remove(&username); } else { *c -= 1; }
     }
     broadcast_users(&state);
+
+    // A dropped connection is an implicit leave from voice too — otherwise a
+    // crashed or closed client leaves a ghost entry showing them still "in"
+    // the channel forever.
+    let was_in_voice = { state.voice.lock().unwrap().remove(&username).is_some() };
+    if was_in_voice { broadcast_voice_state(&state); }
+}
+
+fn broadcast_voice_state(state: &Arc<AppState>) {
+    let channels: std::collections::HashMap<String, Vec<String>> = {
+        let voice = state.voice.lock().unwrap();
+        let mut m: std::collections::HashMap<String, Vec<String>> = std::collections::HashMap::new();
+        for (user, board) in voice.iter() {
+            m.entry(board.clone()).or_default().push(user.clone());
+        }
+        m
+    };
+    let _ = state.tx.send(serde_json::json!({ "type": "voice_state", "channels": channels }).to_string());
 }
 
 fn broadcast_users(state: &Arc<AppState>) {

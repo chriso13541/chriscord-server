@@ -13,4 +13,9 @@ pub struct AppState {
     /// nonce_hex → (issued_at, public_key_hex)
     /// Challenges expire after 60 seconds.
     pub challenges: Mutex<HashMap<String, (Instant, String)>>,
+    /// username → the voice board_id they're currently connected to. A user
+    /// can be in at most one voice channel at a time — joining a new one
+    /// simply overwrites their existing entry, which is what makes "moving"
+    /// between voice channels work without any separate leave step.
+    pub voice: Mutex<HashMap<String, String>>,
 }

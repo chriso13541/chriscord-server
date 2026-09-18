@@ -16,6 +16,7 @@ pub struct Room {
     pub id:         String,
     pub name:       String,
     pub is_private: bool,
+    pub room_type:  String, // "text" or "voice"
 }
 
 #[derive(Serialize)]
@@ -63,7 +64,7 @@ pub async fn list_rooms(
     }
 
     let rows = sqlx::query(
-        "SELECT id, name, is_private FROM rooms ORDER BY created_at ASC",
+        "SELECT id, name, is_private, room_type FROM rooms ORDER BY created_at ASC",
     )
     .fetch_all(&s.pool)
     .await
@@ -75,6 +76,7 @@ pub async fn list_rooms(
                 id:         r.get("id"),
                 name:       r.get("name"),
                 is_private: r.get::<i64, _>("is_private") != 0,
+                room_type:  r.get("room_type"),
             })
             .collect(),
     ))

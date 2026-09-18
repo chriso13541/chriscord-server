@@ -32,6 +32,7 @@ pub struct UpdateSettingsReq {
 pub struct CreateRoomReq {
     pub name:       String,
     pub is_private: Option<bool>,
+    pub room_type:  Option<String>, // "text" or "voice"; defaults to "text"
 }
 
 #[derive(Deserialize)]
@@ -130,17 +131,23 @@ pub async fn create_room(
     if name.is_empty() {
         return Err(bad("Room name is required"));
     }
+    let room_type = match body.room_type.as_deref() {
+        None | Some("text")  => "text",
+        Some("voice")        => "voice",
+        Some(_)              => return Err(bad("room_type must be 'text' or 'voice'")),
+    };
 
     let id         = uuid::Uuid::now_v7().to_string();
     let is_private = body.is_private.unwrap_or(false) as i64;
     let now        = chrono::Utc::now().to_rfc3339();
 
     sqlx::query(
-        "INSERT INTO rooms (id, name, is_private, created_at) VALUES (?, ?, ?, ?)",
+        "INSERT INTO rooms (id, name, is_private, room_type, created_at) VALUES (?, ?, ?, ?, ?)",
     )
     .bind(&id)
     .bind(&name)
     .bind(is_private)
+    .bind(room_type)
     .bind(&now)
     .execute(&s.pool)
     .await
@@ -148,7 +155,7 @@ pub async fn create_room(
 
     let _ = s.tx.send(serde_json::json!({ "type": "rooms_updated" }).to_string());
 
-    Ok(Json(serde_json::json!({ "id": id, "name": name })))
+    Ok(Json(serde_json::json!({ "id": id, "name": name, "room_type": room_type })))
 }
 
 /// GET /api/admin/rooms — list all rooms, authenticated by owner key.
@@ -159,7 +166,7 @@ pub async fn list_rooms_admin(
 ) -> Result<Json<serde_json::Value>, ApiErr> {
     check_owner(&headers, &s)?;
 
-    let rows = sqlx::query("SELECT id, name, is_private FROM rooms ORDER BY created_at ASC")
+    let rows = sqlx::query("SELECT id, name, is_private, room_type FROM rooms ORDER BY created_at ASC")
         .fetch_all(&s.pool)
         .await
         .map_err(|_| dberr())?;
@@ -171,6 +178,7 @@ pub async fn list_rooms_admin(
                 "id":         r.get::<String, _>("id"),
                 "name":       r.get::<String, _>("name"),
                 "is_private": r.get::<i64, _>("is_private") != 0,
+                "room_type":  r.get::<String, _>("room_type"),
             })
         })
         .collect();

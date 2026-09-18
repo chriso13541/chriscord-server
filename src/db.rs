@@ -107,6 +107,7 @@ pub async fn init() -> Result<SqlitePool, sqlx::Error> {
         "ALTER TABLE messages ADD COLUMN edited      INTEGER NOT NULL DEFAULT 0",
         "ALTER TABLE messages ADD COLUMN attachments TEXT",
         "ALTER TABLE sessions ADD COLUMN public_key  TEXT NOT NULL DEFAULT ''",
+        "ALTER TABLE rooms    ADD COLUMN room_type   TEXT NOT NULL DEFAULT 'text'",
     ];
     for sql in migrations {
         let _ = sqlx::query(sql).execute(&pool).await;

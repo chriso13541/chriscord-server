@@ -22,7 +22,7 @@
   h3 { font-size: 0.95rem; margin: 12px 0 8px; color: var(--muted); text-transform: uppercase; letter-spacing: .05em; }
   .card { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 20px; margin-bottom: 20px; }
   label { display: block; font-size: 0.85rem; color: var(--muted); margin-bottom: 4px; margin-top: 10px; }
-  input[type=text], input[type=password] {
+  input[type=text], input[type=password], select {
     width: 100%; padding: 8px 12px; border-radius: 6px;
     border: 1px solid var(--border); background: var(--bg);
     color: var(--text); font-size: 0.9rem;
@@ -99,6 +99,10 @@
   <h3>Create New Room</h3>
   <div class="row">
     <input type="text" id="new-room-name" placeholder="Room name (e.g. Hangout)">
+    <select id="new-room-type">
+      <option value="text">Text</option>
+      <option value="voice">Voice</option>
+    </select>
     <label style="margin:0;display:flex;align-items:center;gap:6px;white-space:nowrap">
       <input type="checkbox" id="new-room-private"> Private
     </label>
@@ -145,20 +149,21 @@ async function renderRooms(rooms) {
     });
     const boards = bRes.ok ? await bRes.json() : [];
 
+    const isVoiceRoom = room.room_type === 'voice';
     const boardChips = boards.map(b => `
       <div class="board-chip">
-        #${b.name}
+        ${isVoiceRoom ? '🔊' : '#'}${b.name}
         <button title="Delete board" onclick="deleteBoard('${b.id}', '${room.id}')">×</button>
       </div>`).join('') || '<span style="color:var(--muted);font-size:.8rem">No boards</span>';
 
     div.innerHTML = `
       <div class="room-header">
-        <div><span class="room-name">🏠 ${room.name}</span><span class="badge">${room.is_private ? '🔒 private' : 'public'}</span></div>
+        <div><span class="room-name">${isVoiceRoom ? '🔊' : '🏠'} ${room.name}</span><span class="badge">${isVoiceRoom ? 'voice' : 'text'}</span><span class="badge">${room.is_private ? '🔒 private' : 'public'}</span></div>
         <button class="small danger" onclick="deleteRoom('${room.id}')">Delete Room</button>
       </div>
       <div class="boards-list" id="boards-${room.id}">${boardChips}</div>
       <div class="add-board-row">
-        <input type="text"     id="bname-${room.id}" placeholder="New board name (e.g. general)">
+        <input type="text"     id="bname-${room.id}" placeholder="${isVoiceRoom ? 'New voice channel name (e.g. General)' : 'New board name (e.g. general)'}">
         <input type="password" id="bkey-${room.id}"  placeholder="Owner key">
         <button class="small" onclick="createBoard('${room.id}')">+ Board</button>
       </div>`;
@@ -183,6 +188,7 @@ async function saveSettings() {
 
 async function createRoom() {
   const name       = document.getElementById('new-room-name').value.trim();
+  const room_type  = document.getElementById('new-room-type').value;
   const is_private = document.getElementById('new-room-private').checked;
   const ownerKey   = document.getElementById('new-room-key').value;
   const msg        = document.getElementById('room-msg');
@@ -190,9 +196,14 @@ async function createRoom() {
   const res = await fetch('/api/admin/rooms', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'X-Owner-Key': ownerKey },
-    body: JSON.stringify({ name, is_private }),
+    body: JSON.stringify({ name, room_type, is_private }),
   });
-  if (res.ok) { msg.className='msg ok'; msg.textContent='✓ Room created!'; document.getElementById('new-room-name').value=''; loadAll(); }
+  if (res.ok) {
+    msg.className='msg ok'; msg.textContent='✓ Room created!';
+    document.getElementById('new-room-name').value='';
+    document.getElementById('new-room-type').value='text';
+    loadAll();
+  }
   else { const e=await res.json(); msg.className='msg err'; msg.textContent='✗ '+e.error; }
 }
 
