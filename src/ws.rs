@@ -10,7 +10,7 @@ use serde::Deserialize;
 use sqlx::Row;
 use std::sync::Arc;
 
-use crate::{db, messages::{row_to_msg, Attachment, HISTORY_PAGE}, state::AppState};
+use crate::{db, messages::{row_to_msg, Attachment, HISTORY_PAGE}, state::AppState, voice};
 
 #[derive(Deserialize)]
 pub struct WsQuery { pub token: String }
@@ -18,10 +18,14 @@ pub struct WsQuery { pub token: String }
 #[derive(Deserialize)]
 struct ClientMsg {
     #[serde(rename = "type")]
-    msg_type:    String,
-    board_id:    Option<String>,
-    content:     Option<String>,
-    attachments: Option<Vec<Attachment>>,
+    msg_type:        String,
+    board_id:        Option<String>,
+    content:         Option<String>,
+    attachments:     Option<Vec<Attachment>>,
+    sdp:             Option<String>,
+    candidate:       Option<String>,
+    sdp_mid:         Option<String>,
+    sdp_mline_index: Option<u16>,
 }
 
 pub async fn ws_handler(
@@ -92,8 +96,41 @@ async fn handle_socket(socket: WebSocket, token: String, state: Arc<AppState>) {
                                 }
                             }
                             "leave_voice" => {
-                                let was_in_voice = { state.voice.lock().unwrap().remove(&username).is_some() };
-                                if was_in_voice { broadcast_voice_state(&state); }
+                                let left_board = { state.voice.lock().unwrap().remove(&username) };
+                                if let Some(bid) = left_board {
+                                    voice::close_participant(&state, &bid, &username).await;
+                                    broadcast_voice_state(&state);
+                                }
+                            }
+                            "voice_offer" => {
+                                if let (Some(bid), Some(sdp)) = (cm.board_id, cm.sdp) {
+                                    let others: Vec<String> = {
+                                        let voice = state.voice.lock().unwrap();
+                                        voice.iter()
+                                            .filter(|(u, b)| **b == bid && **u != username)
+                                            .map(|(u, _)| u.clone())
+                                            .collect()
+                                    };
+                                    match voice::handle_offer(&state, &bid, &username, &sdp, &others).await {
+                                        Ok(answer_sdp) => {
+                                            send_to_user(&state, &username, serde_json::json!({
+                                                "type": "voice_answer", "sdp": answer_sdp,
+                                            }));
+                                        }
+                                        Err(e) => tracing::warn!("voice_offer failed for {username}: {e}"),
+                                    }
+                                }
+                            }
+                            "voice_ice" => {
+                                if let (Some(bid), Some(candidate)) = (cm.board_id, cm.candidate) {
+                                    let init = webrtc::ice_transport::ice_candidate::RTCIceCandidateInit {
+                                        candidate,
+                                        sdp_mid: cm.sdp_mid,
+                                        sdp_mline_index: cm.sdp_mline_index,
+                                        ..Default::default()
+                                    };
+                                    voice::handle_ice_candidate(&state, &bid, &username, init).await;
+                                }
                             }
                             _ => {}
                         }
@@ -115,6 +152,8 @@ async fn handle_socket(socket: WebSocket, token: String, state: Arc<AppState>) {
                                 Some("message_edit") | Some("message_delete") => subscribed_board.as_deref()
                                     .map(|bid| v["board_id"].as_str() == Some(bid))
                                     .unwrap_or(false),
+                                Some("voice_answer") | Some("voice_ice") =>
+                                    v["target"].as_str() == Some(username.as_str()),
                                 _ => false,
                             };
                             if fwd { if sink.send(Message::Text(bcast)).await.is_err() { break; } }
@@ -137,8 +176,24 @@ async fn handle_socket(socket: WebSocket, token: String, state: Arc<AppState>) {
     // A dropped connection is an implicit leave from voice too — otherwise a
     // crashed or closed client leaves a ghost entry showing them still "in"
     // the channel forever.
-    let was_in_voice = { state.voice.lock().unwrap().remove(&username).is_some() };
-    if was_in_voice { broadcast_voice_state(&state); }
+    let left_board = { state.voice.lock().unwrap().remove(&username) };
+    if let Some(bid) = left_board {
+        voice::close_participant(&state, &bid, &username).await;
+        broadcast_voice_state(&state);
+    }
+}
+
+/// Delivers a message to exactly one connected user, by piggybacking on the
+/// same broadcast channel everything else uses — every connection already
+/// receives every broadcast and decides whether to act on it, so a
+/// `target` field plus a matching check in the forwarding whitelist above
+/// is enough to make this "targeted" without needing a separate
+/// per-connection registry.
+pub fn send_to_user(state: &Arc<AppState>, target_username: &str, mut payload: serde_json::Value) {
+    if let Some(obj) = payload.as_object_mut() {
+        obj.insert("target".to_string(), serde_json::Value::String(target_username.to_string()));
+    }
+    let _ = state.tx.send(payload.to_string());
 }
 
 fn broadcast_voice_state(state: &Arc<AppState>) {

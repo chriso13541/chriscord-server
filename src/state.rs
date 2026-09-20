@@ -18,4 +18,9 @@ pub struct AppState {
     /// simply overwrites their existing entry, which is what makes "moving"
     /// between voice channels work without any separate leave step.
     pub voice: Mutex<HashMap<String, String>>,
+    /// The actual WebRTC SFU state — PeerConnections and forwarded audio
+    /// sources per participant. Deliberately a separate field from `voice`
+    /// above (which is pure presence tracking) to avoid conflating "who's
+    /// in the channel" with "what's their live media connection state".
+    pub voice_runtime: crate::voice::VoiceRuntime,
 }
