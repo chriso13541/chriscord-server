@@ -160,11 +160,28 @@ pub async fn handle_offer(
         format!("chriscord-{username}"),
     ));
 
+    // Always explicitly register how to receive this offering client's own
+    // microphone — this need exists on every offer regardless of roster
+    // size. It's easy to assume this only matters when nobody else has
+    // audio to send back, but that's wrong: sending other participants'
+    // audio and receiving this participant's own mic are two separate,
+    // unrelated needs. Making this conditional on the other one having
+    // NOT happened (the previous version of this code) meant it silently
+    // stopped running the moment a second participant existed — exactly
+    // the case that actually needs it. This is the known pion/webrtc-rs
+    // bug class where an incoming track on an unregistered media section
+    // never fires on_track at all.
+    if let Err(e) = pc.add_transceiver_from_kind(
+        RTPCodecType::Audio,
+        Some(RTCRtpTransceiverInit { direction: RTCRtpTransceiverDirection::Recvonly, send_encodings: vec![] }),
+    ).await {
+        tracing::warn!("voice: failed to add recvonly audio transceiver for {username}: {e}");
+    }
+
     // Hear every other current participant who already has forwarded
     // audio available. Someone who hasn't finished negotiating yet simply
     // won't have a source in the map — they'll be picked up once they
     // negotiate and everyone else's next refresh includes them.
-    let mut added_any_track = false;
     {
         let sources = state.voice_runtime.sources.lock().await;
         for other in others {
@@ -173,26 +190,8 @@ pub async fn handle_offer(
                 let track_dyn: Arc<dyn TrackLocal + Send + Sync> = Arc::clone(track) as _;
                 if let Err(e) = pc.add_track(track_dyn).await {
                     tracing::warn!("voice: failed to add track for {other} to {username}'s connection: {e}");
-                } else {
-                    added_any_track = true;
                 }
             }
-        }
-    }
-    // If nobody else has audio to send yet (the first participant in a
-    // channel, or everyone else still negotiating), the offer's single
-    // audio media section would otherwise have nothing explicitly
-    // registered on our side to receive it — a known bug class in
-    // pion/webrtc-rs where an incoming track on an unregistered single
-    // media section never fires on_track at all. Explicitly declaring a
-    // recvonly transceiver here avoids that, regardless of whether we
-    // have anything to send back.
-    if !added_any_track {
-        if let Err(e) = pc.add_transceiver_from_kind(
-            RTPCodecType::Audio,
-            Some(RTCRtpTransceiverInit { direction: RTCRtpTransceiverDirection::Recvonly, send_encodings: vec![] }),
-        ).await {
-            tracing::warn!("voice: failed to add recvonly audio transceiver for {username}: {e}");
         }
     }
 
