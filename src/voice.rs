@@ -9,10 +9,19 @@
 // grounded in real references rather than memory — either confirmed
 // directly via docs.rs (on_track's three-argument closure and the
 // Box::pin(async move {...}) return shape; RTCRtpTransceiver::sender,
-// set_sender_track, and set_direction; SettingEngine::
-// set_ephemeral_udp_port_range and APIBuilder::with_setting_engine — all
-// confirmed against the exact v0.11 docs.rs page matching this project's
-// Cargo.toml) or cross-referenced against pion/webrtc, the Go library this Rust crate is an
+// set_sender_track, and set_direction; APIBuilder::with_setting_engine —
+// all confirmed against the exact v0.11 docs.rs page matching this
+// project's Cargo.toml) or cross-referenced against pion/webrtc, the Go
+// library this Rust crate is an explicit, close port of — which WAS
+// compiled and actually run, including AddTransceiverFromKind producing
+// genuinely separate m= sections in a real offer SDP, in the same session
+// this was written. The one exception, flagged because it was already
+// wrong once: SettingEngine::set_udp_network(UDPNetwork::Ephemeral(...))
+// for constraining the ICE port range is grounded in the current docs.rs
+// API shape and a real usage example (libp2p's webrtc transport), not the
+// exact v0.11 page — an earlier, simpler-looking method that doesn't
+// actually exist in this pinned version was tried first and failed to
+// compile. this Rust crate is an
 // explicit, close port of — which WAS compiled and actually run,
 // including AddTransceiverFromKind producing genuinely separate m=
 // sections in a real offer SDP, in the same session this was written.
@@ -53,6 +62,7 @@ use webrtc::api::interceptor_registry::register_default_interceptors;
 use webrtc::api::media_engine::MediaEngine;
 use webrtc::api::setting_engine::SettingEngine;
 use webrtc::api::{APIBuilder, API};
+use webrtc::ice::udp_network::{EphemeralUDP, UDPNetwork};
 use webrtc::ice_transport::ice_candidate::{RTCIceCandidate, RTCIceCandidateInit};
 use webrtc::ice_transport::ice_server::RTCIceServer;
 use webrtc::interceptor::registry::Registry;
@@ -102,9 +112,9 @@ impl VoiceRuntime {
         registry = register_default_interceptors(registry, &mut media_engine)
             .expect("register default interceptors");
         let mut setting_engine = SettingEngine::default();
-        setting_engine
-            .set_ephemeral_udp_port_range(ICE_UDP_PORT_MIN, ICE_UDP_PORT_MAX)
+        let ephemeral_range = EphemeralUDP::new(ICE_UDP_PORT_MIN, ICE_UDP_PORT_MAX)
             .expect("ICE_UDP_PORT_MIN..ICE_UDP_PORT_MAX is a valid range");
+        setting_engine.set_udp_network(UDPNetwork::Ephemeral(ephemeral_range));
         let api = APIBuilder::new()
             .with_setting_engine(setting_engine)
             .with_media_engine(media_engine)
