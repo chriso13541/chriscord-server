@@ -18,6 +18,14 @@ pub struct AppState {
     /// simply overwrites their existing entry, which is what makes "moving"
     /// between voice channels work without any separate leave step.
     pub voice: Mutex<HashMap<String, String>>,
+    /// username → (muted, deafened) for whoever is currently in a voice
+    /// channel. Keyed by username alone, matching `voice` above, since a
+    /// user can only be in one voice channel at a time. Missing entry
+    /// means not muted/deafened — used so a client joining a voice
+    /// channel already in progress can be told everyone's current status
+    /// immediately, rather than only learning it the next time someone
+    /// happens to toggle.
+    pub voice_status: Mutex<HashMap<String, (bool, bool)>>,
     /// The actual WebRTC SFU state — PeerConnections and forwarded audio
     /// sources per participant. Deliberately a separate field from `voice`
     /// above (which is pure presence tracking) to avoid conflating "who's

@@ -27,6 +27,9 @@ struct ClientMsg {
     sdp_mid:         Option<String>,
     sdp_mline_index: Option<u16>,
     expected_others: Option<Vec<String>>,
+    speaking:        Option<bool>,
+    muted:           Option<bool>,
+    deafened:        Option<bool>,
 }
 
 pub async fn ws_handler(
@@ -91,14 +94,29 @@ async fn handle_socket(socket: WebSocket, token: String, state: Arc<AppState>) {
                                         // A user can only be in one voice channel at a time —
                                         // inserting simply overwrites any previous entry, so
                                         // moving between channels needs no separate leave step.
-                                        { state.voice.lock().unwrap().insert(username.clone(), bid); }
+                                        { state.voice.lock().unwrap().insert(username.clone(), bid.clone()); }
                                         broadcast_voice_state(&state);
+                                        let statuses: Vec<serde_json::Value> = {
+                                            let voice = state.voice.lock().unwrap();
+                                            let status = state.voice_status.lock().unwrap();
+                                            voice.iter()
+                                                .filter(|(u, b)| **b == bid && **u != username)
+                                                .map(|(u, _)| {
+                                                    let (muted, deafened) = status.get(u).copied().unwrap_or((false, false));
+                                                    serde_json::json!({ "username": u, "muted": muted, "deafened": deafened })
+                                                })
+                                                .collect()
+                                        };
+                                        send_to_user(&state, &username, serde_json::json!({
+                                            "type": "voice_status_snapshot", "board_id": bid, "statuses": statuses,
+                                        }));
                                     }
                                 }
                             }
                             "leave_voice" => {
                                 let left_board = { state.voice.lock().unwrap().remove(&username) };
                                 if let Some(bid) = left_board {
+                                    { state.voice_status.lock().unwrap().remove(&username); }
                                     voice::close_participant(&state, &bid, &username).await;
                                     broadcast_voice_state(&state);
                                 }
@@ -134,6 +152,33 @@ async fn handle_socket(socket: WebSocket, token: String, state: Arc<AppState>) {
                                     voice::handle_ice_candidate(&state, &bid, &username, init).await;
                                 }
                             }
+                            "speaking" => {
+                                if let (Some(bid), Some(speaking)) = (cm.board_id, cm.speaking) {
+                                    // Only meaningful if they're actually still in this voice
+                                    // channel — ignore anything else as stale/stray.
+                                    let in_channel = { state.voice.lock().unwrap().get(&username) == Some(&bid) };
+                                    if in_channel {
+                                        let _ = state.tx.send(serde_json::json!({
+                                            "type": "voice_speaking", "board_id": bid,
+                                            "username": username, "speaking": speaking,
+                                        }).to_string());
+                                    }
+                                }
+                            }
+                            "voice_mute_state" => {
+                                if let Some(bid) = cm.board_id {
+                                    let in_channel = { state.voice.lock().unwrap().get(&username) == Some(&bid) };
+                                    if in_channel {
+                                        let muted = cm.muted.unwrap_or(false);
+                                        let deafened = cm.deafened.unwrap_or(false);
+                                        { state.voice_status.lock().unwrap().insert(username.clone(), (muted, deafened)); }
+                                        let _ = state.tx.send(serde_json::json!({
+                                            "type": "voice_mute_state", "board_id": bid, "username": username,
+                                            "muted": muted, "deafened": deafened,
+                                        }).to_string());
+                                    }
+                                }
+                            }
                             _ => {}
                         }
                     }
@@ -150,11 +195,13 @@ async fn handle_socket(socket: WebSocket, token: String, state: Arc<AppState>) {
                                 Some("users") => true,
                                 Some("rooms_updated") => true,
                                 Some("voice_state") => true,
+                                Some("voice_speaking") => true,
+                                Some("voice_mute_state") => true,
                                 Some("message") => true,
                                 Some("message_edit") | Some("message_delete") => subscribed_board.as_deref()
                                     .map(|bid| v["board_id"].as_str() == Some(bid))
                                     .unwrap_or(false),
-                                Some("voice_answer") | Some("voice_ice") =>
+                                Some("voice_answer") | Some("voice_ice") | Some("voice_status_snapshot") =>
                                     v["target"].as_str() == Some(username.as_str()),
                                 _ => false,
                             };
@@ -180,6 +227,7 @@ async fn handle_socket(socket: WebSocket, token: String, state: Arc<AppState>) {
     // the channel forever.
     let left_board = { state.voice.lock().unwrap().remove(&username) };
     if let Some(bid) = left_board {
+        { state.voice_status.lock().unwrap().remove(&username); }
         voice::close_participant(&state, &bid, &username).await;
         broadcast_voice_state(&state);
     }
