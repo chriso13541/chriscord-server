@@ -139,11 +139,12 @@ pub async fn handle_offer(
     // Tear down any previous connection for this exact participant first —
     // this is what makes a "someone joined/left, please refresh" re-offer
     // work correctly: it's handled identically to a first-time join,
-    // nothing about this path needs to know which case it is.
+    // nothing about this path needs to know which case it is. Note this
+    // only removes the PeerConnection, not the source track below — see
+    // its own comment for why that has to persist across a refresh.
     if let Some(old_pc) = state.voice_runtime.connections.lock().await.remove(&key) {
         let _ = old_pc.close().await;
     }
-    state.voice_runtime.sources.lock().await.remove(&key);
 
     let config = RTCConfiguration {
         ice_servers: vec![RTCIceServer {
@@ -162,18 +163,36 @@ pub async fn handle_offer(
     );
 
     // This participant's own outgoing audio, once their microphone track
-    // arrives below. Created now so it can be added to other connections
-    // and registered under `key` before negotiation even completes.
-    let my_source = Arc::new(TrackLocalStaticRTP::new(
-        RTCRtpCodecCapability {
-            mime_type: "audio/opus".to_owned(),
-            clock_rate: 48000,
-            channels: 1,
-            ..Default::default()
-        },
-        format!("audio-{username}"),
-        format!("chriscord-{username}"),
-    ));
+    // arrives below. Reuses the existing source object for this
+    // (board, username) if a previous connection already registered one,
+    // rather than creating a fresh one on every refresh: other
+    // participants' connections may already have this exact object
+    // attached to one of their transceivers, and replacing it out from
+    // under them would silently orphan their attachment — their
+    // transceiver would keep pointing at a track nobody writes to
+    // anymore, with nothing to tell them to reattach to a new one. The
+    // source is this participant's stable identity across reconnects;
+    // only the PeerConnection writing into it actually needs rebuilding.
+    let my_source = {
+        let mut sources = state.voice_runtime.sources.lock().await;
+        match sources.get(&key) {
+            Some(existing) => Arc::clone(existing),
+            None => {
+                let fresh = Arc::new(TrackLocalStaticRTP::new(
+                    RTCRtpCodecCapability {
+                        mime_type: "audio/opus".to_owned(),
+                        clock_rate: 48000,
+                        channels: 1,
+                        ..Default::default()
+                    },
+                    format!("audio-{username}"),
+                    format!("chriscord-{username}"),
+                ));
+                sources.insert(key.clone(), Arc::clone(&fresh));
+                fresh
+            }
+        }
+    };
 
     // When this participant's own microphone track arrives, forward every
     // RTP packet into their shared outgoing source — this is the actual
@@ -291,8 +310,7 @@ pub async fn handle_offer(
         .await
         .map_err(|e| format!("set_local_description failed: {e}"))?;
 
-    state.voice_runtime.connections.lock().await.insert(key.clone(), Arc::clone(&pc));
-    state.voice_runtime.sources.lock().await.insert(key, my_source);
+    state.voice_runtime.connections.lock().await.insert(key, Arc::clone(&pc));
 
     Ok(answer.sdp)
 }
