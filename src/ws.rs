@@ -26,6 +26,7 @@ struct ClientMsg {
     candidate:       Option<String>,
     sdp_mid:         Option<String>,
     sdp_mline_index: Option<u16>,
+    expected_others: Option<Vec<String>>,
 }
 
 pub async fn ws_handler(
@@ -111,7 +112,8 @@ async fn handle_socket(socket: WebSocket, token: String, state: Arc<AppState>) {
                                             .map(|(u, _)| u.clone())
                                             .collect()
                                     };
-                                    match voice::handle_offer(&state, &bid, &username, &sdp, &others).await {
+                                    let expected_others = cm.expected_others.unwrap_or_default();
+                                    match voice::handle_offer(&state, &bid, &username, &sdp, &others, &expected_others).await {
                                         Ok(answer_sdp) => {
                                             send_to_user(&state, &username, serde_json::json!({
                                                 "type": "voice_answer", "sdp": answer_sdp,

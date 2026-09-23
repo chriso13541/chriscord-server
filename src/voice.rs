@@ -8,37 +8,41 @@
 // constraints there. Every method name and callback signature here is
 // grounded in real references rather than memory — either confirmed
 // directly via docs.rs (on_track's three-argument closure and the
-// Box::pin(async move {...}) return shape in particular, which would have
-// been easy to get subtly wrong from memory alone) or cross-referenced
-// against pion/webrtc, the Go library this Rust crate is an explicit,
-// close port of — which WAS compiled and actually run, including a real
-// two-party offer/answer exchange, in the same session this was written.
+// Box::pin(async move {...}) return shape; RTCRtpTransceiver::sender,
+// set_sender_track, and set_direction, all confirmed against the exact
+// v0.11 docs.rs page matching this project's Cargo.toml) or cross-
+// referenced against pion/webrtc, the Go library this Rust crate is an
+// explicit, close port of — which WAS compiled and actually run,
+// including AddTransceiverFromKind producing genuinely separate m=
+// sections in a real offer SDP, in the same session this was written.
 // That said: treat this file as a first draft. If `cargo build` doesn't
 // succeed, paste the exact error back and it'll get fixed from there —
 // that's expected, not a sign anything went wrong in how it was written.
 //
-// Design — the "simple" version, deliberately built so it can evolve into
-// seamless mid-call renegotiation later without a rewrite:
-//   - Every voice_offer creates a BRAND NEW PeerConnection for that
-//     (board, user) pair, closing any previous one for the same pair
-//     first. A "someone joined or left, please refresh" re-offer from an
-//     existing participant is handled by exactly the same code path as a
-//     first-time join — there's no separate "renegotiate" branch.
+// Design — each participant's offer declares its own real shape upfront:
+// their own mic (transceiver 0) plus one receive-only placeholder per
+// other participant they already know about (transceivers 1..), sent
+// alongside the offer as an ordered `expected_others` list. The server
+// attaches each known participant's audio to its matching placeholder by
+// position — never adding media sections the offer didn't already
+// reserve, since an SDP answer can't validly declare more sections than
+// its offer did. A "someone joined or left, please refresh" re-offer is
+// handled by exactly the same code path as a first-time join: a brand new
+// PeerConnection for that (board, user) pair, replacing any previous one.
 //   - RTP forwarding: each participant's OWN incoming audio, once
 //     negotiated, gets read from their PeerConnection and written into a
 //     single shared TrackLocalStaticRTP unique to them. That same shared
-//     track object gets added as an outgoing track to every OTHER
-//     participant's PeerConnection. Writing to it once fans out to
-//     everyone who has added it — this is the standard SFU forwarding
-//     pattern, and it's what keeps the server from ever needing to decode
-//     or re-encode audio: it only ever moves RTP packets around.
+//     track object gets attached to every OTHER participant's matching
+//     placeholder transceiver. Writing to it once fans out to everyone
+//     who has it attached — the standard SFU forwarding pattern, and
+//     what keeps the server from ever needing to decode or re-encode
+//     audio: it only ever moves RTP packets around.
 //   - What a future seamless version changes: instead of everyone
 //     tearing down and re-offering on every roster change, the server
-//     would instead call add_track on each EXISTING participant's
-//     connection for the new participant's source, and trigger
-//     renegotiation just for those — reusing this exact same
-//     PeerConnection-per-participant and shared-source-track machinery,
-//     just orchestrated differently.
+//     would instead trigger renegotiation on each EXISTING participant's
+//     connection to add the new participant's source — reusing this
+//     exact same PeerConnection-per-participant and shared-source-track
+//     machinery, just orchestrated differently.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -53,9 +57,7 @@ use webrtc::interceptor::registry::Registry;
 use webrtc::peer_connection::configuration::RTCConfiguration;
 use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
 use webrtc::peer_connection::RTCPeerConnection;
-use webrtc::rtp_transceiver::rtp_codec::RTPCodecType;
 use webrtc::rtp_transceiver::rtp_transceiver_direction::RTCRtpTransceiverDirection;
-use webrtc::rtp_transceiver::RTCRtpTransceiverInit;
 use webrtc::rtp_transceiver::rtp_codec::RTCRtpCodecCapability;
 use webrtc::rtp_transceiver::rtp_receiver::RTCRtpReceiver;
 use webrtc::rtp_transceiver::RTCRtpTransceiver;
@@ -106,23 +108,31 @@ impl Default for VoiceRuntime {
 }
 
 /// Handles an incoming SDP offer for a (board, user) pair: tears down any
-/// existing connection for that exact pair, builds a fresh PeerConnection
-/// wired to hear every other current participant, and returns the SDP
-/// answer to send back over the signaling WebSocket. `others` is the
-/// current username roster of the board, excluding `username` itself —
-/// the caller (ws.rs) already has this from the existing voice-presence
-/// tracking, so it doesn't need to be recomputed here.
+/// existing connection for that exact pair, and returns the SDP answer to
+/// send back over the signaling WebSocket.
+///
+/// `expected_others` is the ordered list of usernames the client declared
+/// placeholder receive-only transceivers for when it built this offer —
+/// transceiver index 0 is always this participant's own mic (from
+/// AddTrack on their side), and transceiver index i+1 corresponds to
+/// expected_others[i]. This is what makes attaching each other
+/// participant's audio valid: an answer can't declare more media sections
+/// than the offer did, so the client has to reserve the slots upfront
+/// rather than the server trying to invent extra ones. `others` is the
+/// server's own, independently-tracked roster — kept only for logging, so
+/// a mismatch between what the client expected and what the server
+/// actually knows is visible rather than silently papered over.
 pub async fn handle_offer(
     state: &Arc<AppState>,
     board_id: &str,
     username: &str,
     offer_sdp: &str,
     others: &[String],
+    expected_others: &[String],
 ) -> Result<String, String> {
     tracing::info!(
-        "voice: offer from {username} for board {board_id} ({} other(s) known: {:?})",
-        others.len(),
-        others,
+        "voice: offer from {username} for board {board_id} — server knows of {:?}, client expected {:?}",
+        others, expected_others,
     );
     let key: ParticipantKey = (board_id.to_string(), username.to_string());
 
@@ -165,45 +175,10 @@ pub async fn handle_offer(
         format!("chriscord-{username}"),
     ));
 
-    // Always explicitly register how to receive this offering client's own
-    // microphone — this need exists on every offer regardless of roster
-    // size. It's easy to assume this only matters when nobody else has
-    // audio to send back, but that's wrong: sending other participants'
-    // audio and receiving this participant's own mic are two separate,
-    // unrelated needs. Making this conditional on the other one having
-    // NOT happened (the previous version of this code) meant it silently
-    // stopped running the moment a second participant existed — exactly
-    // the case that actually needs it. This is the known pion/webrtc-rs
-    // bug class where an incoming track on an unregistered media section
-    // never fires on_track at all.
-    if let Err(e) = pc.add_transceiver_from_kind(
-        RTPCodecType::Audio,
-        Some(RTCRtpTransceiverInit { direction: RTCRtpTransceiverDirection::Recvonly, send_encodings: vec![] }),
-    ).await {
-        tracing::warn!("voice: failed to add recvonly audio transceiver for {username}: {e}");
-    }
-
-    // Hear every other current participant who already has forwarded
-    // audio available. Someone who hasn't finished negotiating yet simply
-    // won't have a source in the map — they'll be picked up once they
-    // negotiate and everyone else's next refresh includes them.
-    {
-        let sources = state.voice_runtime.sources.lock().await;
-        for other in others {
-            let other_key = (board_id.to_string(), other.clone());
-            if let Some(track) = sources.get(&other_key) {
-                let track_dyn: Arc<dyn TrackLocal + Send + Sync> = Arc::clone(track) as _;
-                if let Err(e) = pc.add_track(track_dyn).await {
-                    tracing::warn!("voice: failed to add track for {other} to {username}'s connection: {e}");
-                }
-            }
-        }
-    }
-
     // When this participant's own microphone track arrives, forward every
     // RTP packet into their shared outgoing source — this is the actual
     // "selective forwarding" step; every other participant's connection
-    // that has added this same track object receives these packets too.
+    // that has attached this same track object receives these packets too.
     let forward_target = Arc::clone(&my_source);
     let username_for_track = username.to_string();
     pc.on_track(Box::new(
@@ -268,6 +243,45 @@ pub async fn handle_offer(
     pc.set_remote_description(remote_desc)
         .await
         .map_err(|e| format!("set_remote_description failed: {e}"))?;
+
+    // The offer's own transceivers now exist, created from its media
+    // sections by set_remote_description above: index 0 is this
+    // participant's own mic (already covered by on_track), and indices
+    // 1.. are the placeholder receive-only slots the client declared, one
+    // per expected_others entry, in the same order. Attach each known
+    // participant's already-forwarded audio to its matching placeholder
+    // by position — this is what a plain add_track before
+    // set_remote_description couldn't validly do, since an answer can't
+    // declare more media sections than the offer did. A placeholder with
+    // nothing to attach yet (someone who hasn't finished negotiating), or
+    // an offer that declared more placeholders than expected_others names
+    // (always at least one, even solo, to avoid a known pion/webrtc-rs bug
+    // where a single-media-section offer's on_track never fires at all),
+    // simply stays empty and unused — harmless.
+    let transceivers = pc.get_transceivers().await;
+    {
+        let sources = state.voice_runtime.sources.lock().await;
+        for (i, other) in expected_others.iter().enumerate() {
+            let transceiver_index = i + 1; // index 0 is this participant's own mic
+            let Some(transceiver) = transceivers.get(transceiver_index) else {
+                tracing::warn!(
+                    "voice: {username}'s offer didn't declare a placeholder for {other} at index {transceiver_index} — will be picked up on their next refresh"
+                );
+                continue;
+            };
+            let other_key = (board_id.to_string(), other.clone());
+            let Some(track) = sources.get(&other_key) else {
+                continue; // other participant hasn't finished negotiating yet
+            };
+            let track_dyn: Arc<dyn TrackLocal + Send + Sync> = Arc::clone(track) as _;
+            let sender = transceiver.sender().await;
+            if let Err(e) = transceiver.set_sender_track(sender, Some(track_dyn)).await {
+                tracing::warn!("voice: failed to attach {other}'s audio to {username}'s connection: {e}");
+                continue;
+            }
+            transceiver.set_direction(RTCRtpTransceiverDirection::Sendonly).await;
+        }
+    }
 
     let answer = pc
         .create_answer(None)
