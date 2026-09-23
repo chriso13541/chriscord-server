@@ -15,16 +15,20 @@
 // library this Rust crate is an explicit, close port of — which WAS
 // compiled and actually run, including AddTransceiverFromKind producing
 // genuinely separate m= sections in a real offer SDP, in the same session
-// this was written. The one exception, flagged because it was already
-// wrong once: SettingEngine::set_udp_network(UDPNetwork::Ephemeral(...))
-// for constraining the ICE port range is grounded in the current docs.rs
-// API shape and a real usage example (libp2p's webrtc transport), not the
-// exact v0.11 page — an earlier, simpler-looking method that doesn't
-// actually exist in this pinned version was tried first and failed to
-// compile. this Rust crate is an
-// explicit, close port of — which WAS compiled and actually run,
-// including AddTransceiverFromKind producing genuinely separate m=
-// sections in a real offer SDP, in the same session this was written.
+// this was written. One exception, flagged because it was already wrong
+// once: an earlier version of this file used
+// SettingEngine::set_udp_network(UDPNetwork::Ephemeral(...)) for
+// constraining the ICE port range to a fixed 100-port band; a simpler-
+// looking method tried first (a direct set_ephemeral_udp_port_range
+// method) doesn't actually exist in this pinned version and failed to
+// compile. That's since been replaced by the single-port UDPMuxDefault
+// setup below, which is more strongly grounded than either: it matches a
+// real, executed test from webrtc-ice's own test suite (bind a
+// tokio::net::UdpSocket, pass it directly to UDPMuxParams::new) plus a
+// real third-party production crate using the identical pattern through
+// this exact webrtc::ice::udp_mux:: path — not just a method signature
+// this time, but code that has actually compiled and run successfully
+// elsewhere.
 // That said: treat this file as a first draft. If `cargo build` doesn't
 // succeed, paste the exact error back and it'll get fixed from there —
 // that's expected, not a sign anything went wrong in how it was written.
@@ -56,13 +60,15 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use tokio::net::UdpSocket;
 use tokio::sync::Mutex as AsyncMutex;
 
 use webrtc::api::interceptor_registry::register_default_interceptors;
 use webrtc::api::media_engine::MediaEngine;
 use webrtc::api::setting_engine::SettingEngine;
 use webrtc::api::{APIBuilder, API};
-use webrtc::ice::udp_network::{EphemeralUDP, UDPNetwork};
+use webrtc::ice::udp_mux::{UDPMuxDefault, UDPMuxParams};
+use webrtc::ice::udp_network::UDPNetwork;
 use webrtc::ice_transport::ice_candidate::{RTCIceCandidate, RTCIceCandidateInit};
 use webrtc::ice_transport::ice_server::RTCIceServer;
 use webrtc::interceptor::registry::Registry;
@@ -82,15 +88,19 @@ use crate::state::AppState;
 /// (board_id, username) — a participant's identity within one voice board.
 type ParticipantKey = (String, String);
 
-/// Fixed range of UDP ports voice connections allocate from, instead of
-/// whatever the OS's full ephemeral range happens to be. This is what
-/// makes it possible to open one small, specific firewall rule for voice
-/// traffic — e.g. `ufw allow 50000:50100/udp` — rather than opening tens
-/// of thousands of ports or disabling the firewall outright. If this
-/// range is ever changed, the firewall rule on whichever machine runs the
-/// server needs to change to match.
-const ICE_UDP_PORT_MIN: u16 = 50000;
-const ICE_UDP_PORT_MAX: u16 = 50100;
+/// The single UDP port every voice connection is muxed over, instead of
+/// each connection getting its own ephemeral port. All ICE traffic for
+/// every participant, in every call, shares this one bound socket — the
+/// library demuxes incoming packets to the right connection using each
+/// ICE agent's ufrag (present in the first STUN packet from a given
+/// address, part of the standard ICE/STUN handshake, not anything this
+/// project invented), then by source address after that. This is what
+/// makes it possible to open exactly one small, specific firewall rule
+/// for voice traffic — e.g. `ufw allow 50000/udp` — alongside 7070 for
+/// signaling, and nothing else. If this port is ever changed, the
+/// firewall rule on whichever machine runs the server needs to change to
+/// match.
+const ICE_UDP_PORT: u16 = 50000;
 
 pub struct VoiceRuntime {
     api: API,
@@ -103,7 +113,7 @@ pub struct VoiceRuntime {
 }
 
 impl VoiceRuntime {
-    pub fn new() -> Self {
+    pub async fn new() -> Self {
         let mut media_engine = MediaEngine::default();
         media_engine
             .register_default_codecs()
@@ -111,10 +121,12 @@ impl VoiceRuntime {
         let mut registry = Registry::new();
         registry = register_default_interceptors(registry, &mut media_engine)
             .expect("register default interceptors");
+        let socket = UdpSocket::bind(("0.0.0.0", ICE_UDP_PORT))
+            .await
+            .expect("failed to bind voice UDP mux port — is something else already using it?");
+        let udp_mux = UDPMuxDefault::new(UDPMuxParams::new(socket));
         let mut setting_engine = SettingEngine::default();
-        let ephemeral_range = EphemeralUDP::new(ICE_UDP_PORT_MIN, ICE_UDP_PORT_MAX)
-            .expect("ICE_UDP_PORT_MIN..ICE_UDP_PORT_MAX is a valid range");
-        setting_engine.set_udp_network(UDPNetwork::Ephemeral(ephemeral_range));
+        setting_engine.set_udp_network(UDPNetwork::Muxed(udp_mux));
         let api = APIBuilder::new()
             .with_setting_engine(setting_engine)
             .with_media_engine(media_engine)

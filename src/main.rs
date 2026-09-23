@@ -44,7 +44,7 @@ async fn main() {
         online:     Mutex::new(HashMap::new()),
         challenges: Mutex::new(HashMap::new()),
         voice:      Mutex::new(HashMap::new()),
-        voice_runtime: voice::VoiceRuntime::new(),
+        voice_runtime: voice::VoiceRuntime::new().await,
     });
 
     println!();
