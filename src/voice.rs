@@ -53,9 +53,10 @@ use webrtc::peer_connection::configuration::RTCConfiguration;
 use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
 use webrtc::peer_connection::RTCPeerConnection;
 use webrtc::rtp_transceiver::rtp_transceiver_direction::RTCRtpTransceiverDirection;
-use webrtc::rtp_transceiver::rtp_codec::RTCRtpCodecCapability;
+use webrtc::rtp_transceiver::rtp_codec::{RTCRtpCodecCapability, RTCRtpHeaderExtensionCapability, RTPCodecType};
 use webrtc::rtp_transceiver::rtp_receiver::RTCRtpReceiver;
 use webrtc::rtp_transceiver::RTCRtpTransceiver;
+use webrtc::sdp::extmap::SDES_MID_URI;
 use webrtc::track::track_local::track_local_static_rtp::TrackLocalStaticRTP;
 use webrtc::track::track_local::{TrackLocal, TrackLocalWriter};
 use webrtc::track::track_remote::TrackRemote;
@@ -100,6 +101,30 @@ impl VoiceRuntime {
         media_engine
             .register_default_codecs()
             .expect("register default codecs");
+        // Every offer here has multiple audio m= sections bundled together
+        // (this participant's own mic, plus one receive-only placeholder
+        // per other participant — see handle_offer's own comment on
+        // expected_others). Without this, the server has no negotiated way
+        // to tell incoming packets on different sections apart, and falls
+        // back to a probing path that only works reliably when every
+        // packet's `mid` RTP header extension gets through — occasionally
+        // it doesn't, and that participant's audio silently stops for the
+        // rest of that connection ("Incoming unhandled RTP ssrc(...), on_
+        // track will not be fired. mid RTP Extensions required for
+        // Simulcast" in the server log). Registering it here is what makes
+        // the server actually negotiate and use it. Confirmed against this
+        // project's exact pinned v0.11 source, where this identical
+        // register_header_extension pattern is already used elsewhere
+        // (interceptor_registry, for a different extension) — not just a
+        // method signature, but code known to compile and run in this
+        // exact version.
+        media_engine
+            .register_header_extension(
+                RTCRtpHeaderExtensionCapability { uri: SDES_MID_URI.to_owned() },
+                RTPCodecType::Audio,
+                None,
+            )
+            .expect("register mid header extension for audio");
         let mut registry = Registry::new();
         registry = register_default_interceptors(registry, &mut media_engine)
             .expect("register default interceptors");
