@@ -9,9 +9,10 @@
 // grounded in real references rather than memory — either confirmed
 // directly via docs.rs (on_track's three-argument closure and the
 // Box::pin(async move {...}) return shape; RTCRtpTransceiver::sender,
-// set_sender_track, and set_direction, all confirmed against the exact
-// v0.11 docs.rs page matching this project's Cargo.toml) or cross-
-// referenced against pion/webrtc, the Go library this Rust crate is an
+// set_sender_track, and set_direction; SettingEngine::
+// set_ephemeral_udp_port_range and APIBuilder::with_setting_engine — all
+// confirmed against the exact v0.11 docs.rs page matching this project's
+// Cargo.toml) or cross-referenced against pion/webrtc, the Go library this Rust crate is an
 // explicit, close port of — which WAS compiled and actually run,
 // including AddTransceiverFromKind producing genuinely separate m=
 // sections in a real offer SDP, in the same session this was written.
@@ -50,6 +51,7 @@ use tokio::sync::Mutex as AsyncMutex;
 
 use webrtc::api::interceptor_registry::register_default_interceptors;
 use webrtc::api::media_engine::MediaEngine;
+use webrtc::api::setting_engine::SettingEngine;
 use webrtc::api::{APIBuilder, API};
 use webrtc::ice_transport::ice_candidate::{RTCIceCandidate, RTCIceCandidateInit};
 use webrtc::ice_transport::ice_server::RTCIceServer;
@@ -70,6 +72,16 @@ use crate::state::AppState;
 /// (board_id, username) — a participant's identity within one voice board.
 type ParticipantKey = (String, String);
 
+/// Fixed range of UDP ports voice connections allocate from, instead of
+/// whatever the OS's full ephemeral range happens to be. This is what
+/// makes it possible to open one small, specific firewall rule for voice
+/// traffic — e.g. `ufw allow 50000:50100/udp` — rather than opening tens
+/// of thousands of ports or disabling the firewall outright. If this
+/// range is ever changed, the firewall rule on whichever machine runs the
+/// server needs to change to match.
+const ICE_UDP_PORT_MIN: u16 = 50000;
+const ICE_UDP_PORT_MAX: u16 = 50100;
+
 pub struct VoiceRuntime {
     api: API,
     /// Each participant's live PeerConnection to the server.
@@ -89,7 +101,12 @@ impl VoiceRuntime {
         let mut registry = Registry::new();
         registry = register_default_interceptors(registry, &mut media_engine)
             .expect("register default interceptors");
+        let mut setting_engine = SettingEngine::default();
+        setting_engine
+            .set_ephemeral_udp_port_range(ICE_UDP_PORT_MIN, ICE_UDP_PORT_MAX)
+            .expect("ICE_UDP_PORT_MIN..ICE_UDP_PORT_MAX is a valid range");
         let api = APIBuilder::new()
+            .with_setting_engine(setting_engine)
             .with_media_engine(media_engine)
             .with_interceptor_registry(registry)
             .build();
