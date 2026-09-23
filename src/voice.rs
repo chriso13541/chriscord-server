@@ -119,6 +119,11 @@ pub async fn handle_offer(
     offer_sdp: &str,
     others: &[String],
 ) -> Result<String, String> {
+    tracing::info!(
+        "voice: offer from {username} for board {board_id} ({} other(s) known: {:?})",
+        others.len(),
+        others,
+    );
     let key: ParticipantKey = (board_id.to_string(), username.to_string());
 
     // Tear down any previous connection for this exact participant first —
