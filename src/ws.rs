@@ -152,6 +152,11 @@ async fn handle_socket(socket: WebSocket, token: String, state: Arc<AppState>) {
                                     voice::handle_ice_candidate(&state, &bid, &username, init).await;
                                 }
                             }
+                            "voice_renegotiate_answer" => {
+                                if let (Some(bid), Some(sdp)) = (cm.board_id, cm.sdp) {
+                                    voice::handle_renegotiate_answer(&state, &bid, &username, &sdp).await;
+                                }
+                            }
                             "speaking" => {
                                 if let (Some(bid), Some(speaking)) = (cm.board_id, cm.speaking) {
                                     // Only meaningful if they're actually still in this voice
@@ -201,7 +206,7 @@ async fn handle_socket(socket: WebSocket, token: String, state: Arc<AppState>) {
                                 Some("message_edit") | Some("message_delete") => subscribed_board.as_deref()
                                     .map(|bid| v["board_id"].as_str() == Some(bid))
                                     .unwrap_or(false),
-                                Some("voice_answer") | Some("voice_ice") | Some("voice_status_snapshot") =>
+                                Some("voice_answer") | Some("voice_ice") | Some("voice_status_snapshot") | Some("voice_renegotiate") =>
                                     v["target"].as_str() == Some(username.as_str()),
                                 _ => false,
                             };

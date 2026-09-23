@@ -14,14 +14,12 @@
 //
 // Design — each participant's offer declares its own real shape upfront:
 // their own mic (transceiver 0) plus one receive-only placeholder per
-// other participant they already know about (transceivers 1..), sent
-// alongside the offer as an ordered `expected_others` list. The server
-// attaches each known participant's audio to its matching placeholder by
-// position — never adding media sections the offer didn't already
-// reserve, since an SDP answer can't validly declare more sections than
-// its offer did. A "someone joined or left, please refresh" re-offer is
-// handled by exactly the same code path as a first-time join: a brand new
-// PeerConnection for that (board, user) pair, replacing any previous one.
+// other participant they already know about at join time (transceivers
+// 1..), sent alongside the offer as an ordered `expected_others` list. The
+// server attaches each known participant's audio to its matching
+// placeholder by position — never adding media sections the offer didn't
+// already reserve, since an SDP answer can't validly declare more
+// sections than its offer did.
 //   - RTP forwarding: each participant's OWN incoming audio, once
 //     negotiated, gets read from their PeerConnection and written into a
 //     single shared TrackLocalStaticRTP unique to them. That same shared
@@ -30,14 +28,23 @@
 //     who has it attached — the standard SFU forwarding pattern, and
 //     what keeps the server from ever needing to decode or re-encode
 //     audio: it only ever moves RTP packets around.
-//   - What a future seamless version changes: instead of everyone
-//     tearing down and re-offering on every roster change, the server
-//     would instead trigger renegotiation on each EXISTING participant's
-//     connection to add the new participant's source — reusing this
-//     exact same PeerConnection-per-participant and shared-source-track
-//     machinery, just orchestrated differently.
+//   - Seamless mid-call updates: when someone joins AFTER others are
+//     already connected, those existing participants' connections are
+//     never torn down or rebuilt. Instead the server renegotiates each of
+//     them in place — adds a new transceiver to their already-established
+//     PeerConnection, attaches the new participant's source to it, and
+//     sends them a fresh offer for just that one connection (see
+//     renegotiate_one/renegotiate_others_for_new_source below). Their own
+//     already-flowing audio, ICE state, and everyone else they can
+//     already hear are completely unaffected — this is what replaced the
+//     earlier "everyone re-offers from scratch on every roster change"
+//     design, which caused a brief audible drop for every other
+//     participant whenever anyone joined or left. Leaving still doesn't
+//     trigger a renegotiation to remove that participant's section — their
+//     track just stops producing audio, which is harmless and keeps this
+//     simpler; only joining requires proactively updating everyone else.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tokio::sync::Mutex as AsyncMutex;
 
@@ -93,6 +100,14 @@ pub struct VoiceRuntime {
     /// on_track handler, added as an outgoing track to everyone else's
     /// connection so a single write fans out to the whole room.
     sources: AsyncMutex<HashMap<ParticipantKey, Arc<TrackLocalStaticRTP>>>,
+    /// For each participant's connection, the set of other usernames it
+    /// already has a transceiver attached for — whether from their own
+    /// initial offer's expected_others, or from a later seamless
+    /// renegotiation when someone new joined after them. This is what lets
+    /// renegotiation add only what's actually missing, and lets it safely
+    /// run more than once for the same participant without duplicating
+    /// attachments.
+    attached_peers: AsyncMutex<HashMap<ParticipantKey, HashSet<String>>>,
 }
 
 impl VoiceRuntime {
@@ -141,6 +156,7 @@ impl VoiceRuntime {
             api,
             connections: AsyncMutex::new(HashMap::new()),
             sources: AsyncMutex::new(HashMap::new()),
+            attached_peers: AsyncMutex::new(HashMap::new()),
         }
     }
 }
@@ -211,11 +227,13 @@ pub async fn handle_offer(
     // anymore, with nothing to tell them to reattach to a new one. The
     // source is this participant's stable identity across reconnects;
     // only the PeerConnection writing into it actually needs rebuilding.
+    let mut is_new_participant = false;
     let my_source = {
         let mut sources = state.voice_runtime.sources.lock().await;
         match sources.get(&key) {
             Some(existing) => Arc::clone(existing),
             None => {
+                is_new_participant = true;
                 let fresh = Arc::new(TrackLocalStaticRTP::new(
                     RTCRtpCodecCapability {
                         mime_type: "audio/opus".to_owned(),
@@ -316,13 +334,14 @@ pub async fn handle_offer(
     // where a single-media-section offer's on_track never fires at all),
     // simply stays empty and unused — harmless.
     let transceivers = pc.get_transceivers().await;
+    let mut newly_attached: Vec<String> = Vec::new();
     {
         let sources = state.voice_runtime.sources.lock().await;
         for (i, other) in expected_others.iter().enumerate() {
             let transceiver_index = i + 1; // index 0 is this participant's own mic
             let Some(transceiver) = transceivers.get(transceiver_index) else {
                 tracing::warn!(
-                    "voice: {username}'s offer didn't declare a placeholder for {other} at index {transceiver_index} — will be picked up on their next refresh"
+                    "voice: {username}'s offer didn't declare a placeholder for {other} at index {transceiver_index}"
                 );
                 continue;
             };
@@ -337,7 +356,12 @@ pub async fn handle_offer(
                 continue;
             }
             transceiver.set_direction(RTCRtpTransceiverDirection::Sendonly).await;
+            newly_attached.push(other.clone());
         }
+    }
+    if !newly_attached.is_empty() {
+        let mut attached = state.voice_runtime.attached_peers.lock().await;
+        attached.entry(key.clone()).or_default().extend(newly_attached);
     }
 
     let answer = pc
@@ -350,7 +374,152 @@ pub async fn handle_offer(
 
     state.voice_runtime.connections.lock().await.insert(key, Arc::clone(&pc));
 
+    // A genuinely new participant (not a refresh/reconnect of an existing
+    // one) — trigger seamless renegotiation on everyone else's EXISTING
+    // connections in the background, so they hear this new participant
+    // without their own connection ever being touched. Spawned rather than
+    // awaited here so this new participant's own answer isn't held up
+    // waiting on however many other renegotiations there are to do.
+    if is_new_participant {
+        let state_for_renegotiate = Arc::clone(state);
+        let board_id_owned = board_id.to_string();
+        let username_owned = username.to_string();
+        tokio::spawn(async move {
+            renegotiate_others_for_new_source(&state_for_renegotiate, &board_id_owned, &username_owned).await;
+        });
+    }
+
     Ok(answer.sdp)
+}
+
+/// Renegotiates every other current participant's EXISTING connection on
+/// this board, in sequence, to add the newly-joined participant's audio —
+/// this is the actual "seamless" mechanism: their own established
+/// PeerConnection, ICE state, and already-flowing audio to and from them
+/// are never touched. Processed one at a time (not concurrently) so two
+/// people joining moments apart can't both try to renegotiate the same
+/// existing connection at once, which the WebRTC signaling state machine
+/// doesn't allow — a connection has to return to "stable" before it can
+/// process another offer.
+async fn renegotiate_others_for_new_source(state: &Arc<AppState>, board_id: &str, new_username: &str) {
+    let others: Vec<(ParticipantKey, Arc<RTCPeerConnection>)> = {
+        let connections = state.voice_runtime.connections.lock().await;
+        connections
+            .iter()
+            .filter(|((b, u), _)| b == board_id && u != new_username)
+            .map(|(k, pc)| (k.clone(), Arc::clone(pc)))
+            .collect()
+    };
+    for (key, pc) in others {
+        if let Err(e) = renegotiate_one(state, &key, &pc, board_id).await {
+            tracing::warn!("voice: renegotiation failed for {}: {e}", key.1);
+        }
+    }
+}
+
+/// Adds a transceiver (and attaches its audio) for every current board
+/// member this one connection doesn't already have one for, then
+/// renegotiates — create_offer/set_local_description on an ALREADY-
+/// established PeerConnection is exactly how WebRTC renegotiation works;
+/// nothing about the connection's existing transceivers, ICE state, or
+/// already-flowing audio is affected by adding more. Checking against
+/// attached_peers (rather than just adding one transceiver for the one
+/// participant that triggered this call) makes this self-healing: if a
+/// renegotiation for one new participant ever gets missed or races with
+/// another, the very next renegotiation for this same connection picks up
+/// anything still missing, rather than requiring perfect ordering.
+async fn renegotiate_one(
+    state: &Arc<AppState>,
+    key: &ParticipantKey,
+    pc: &Arc<RTCPeerConnection>,
+    board_id: &str,
+) -> Result<(), String> {
+    let username = &key.1;
+    let missing: Vec<String> = {
+        let voice = state.voice.lock().unwrap();
+        let attached = state.voice_runtime.attached_peers.lock().await;
+        let already = attached.get(key).cloned().unwrap_or_default();
+        voice
+            .iter()
+            .filter(|(u, b)| **b == *board_id && *u != username && !already.contains(*u))
+            .map(|(u, _)| u.clone())
+            .collect()
+    };
+    if missing.is_empty() {
+        return Ok(());
+    }
+
+    let mut newly_attached = Vec::new();
+    {
+        let sources = state.voice_runtime.sources.lock().await;
+        for other in &missing {
+            let other_key = (board_id.to_string(), other.clone());
+            let Some(track) = sources.get(&other_key) else {
+                continue; // that other participant hasn't finished negotiating yet
+            };
+            let transceiver = pc
+                .add_transceiver_from_kind(
+                    RTPCodecType::Audio,
+                    Some(RTCRtpTransceiverInit { direction: RTCRtpTransceiverDirection::Recvonly, send_encodings: vec![] }),
+                )
+                .await
+                .map_err(|e| format!("add_transceiver_from_kind for {other}: {e}"))?;
+            let track_dyn: Arc<dyn TrackLocal + Send + Sync> = Arc::clone(track) as _;
+            let sender = transceiver.sender().await;
+            transceiver
+                .set_sender_track(sender, Some(track_dyn))
+                .await
+                .map_err(|e| format!("set_sender_track for {other}: {e}"))?;
+            transceiver.set_direction(RTCRtpTransceiverDirection::Sendonly).await;
+            newly_attached.push(other.clone());
+        }
+    }
+    if newly_attached.is_empty() {
+        return Ok(()); // everyone missing was still mid-negotiation — nothing to renegotiate yet
+    }
+
+    let offer = pc.create_offer(None).await.map_err(|e| format!("create_offer: {e}"))?;
+    pc.set_local_description(offer.clone())
+        .await
+        .map_err(|e| format!("set_local_description: {e}"))?;
+
+    {
+        let mut attached = state.voice_runtime.attached_peers.lock().await;
+        attached.entry(key.clone()).or_default().extend(newly_attached);
+    }
+
+    crate::ws::send_to_user(
+        state,
+        username,
+        serde_json::json!({ "type": "voice_renegotiate", "board_id": board_id, "sdp": offer.sdp }),
+    );
+    Ok(())
+}
+
+/// Applies the client's answer to a server-initiated renegotiation (see
+/// renegotiate_one above) — set_remote_description on the SAME, already-
+/// established PeerConnection, completing that offer/answer round without
+/// ever having torn anything down. If there's no matching connection
+/// (e.g. it raced with the participant leaving), this is silently a
+/// no-op rather than an error, same reasoning as handle_ice_candidate
+/// below.
+pub async fn handle_renegotiate_answer(
+    state: &Arc<AppState>,
+    board_id: &str,
+    username: &str,
+    answer_sdp: &str,
+) {
+    let key: ParticipantKey = (board_id.to_string(), username.to_string());
+    let Some(pc) = state.voice_runtime.connections.lock().await.get(&key).cloned() else {
+        return;
+    };
+    let Ok(remote_desc) = RTCSessionDescription::answer(answer_sdp.to_string()) else {
+        tracing::warn!("voice: invalid renegotiation answer SDP from {username}");
+        return;
+    };
+    if let Err(e) = pc.set_remote_description(remote_desc).await {
+        tracing::warn!("voice: set_remote_description failed for {username}'s renegotiation answer: {e}");
+    }
 }
 
 /// Applies an ICE candidate the client sent for its own (board, user)
@@ -381,4 +550,15 @@ pub async fn close_participant(state: &Arc<AppState>, board_id: &str, username: 
         let _ = pc.close().await;
     }
     state.voice_runtime.sources.lock().await.remove(&key);
+    // Also drop any references to this participant from everyone else's
+    // attached_peers sets — otherwise, if they rejoin later (with a fresh
+    // source object), renegotiation would wrongly think everyone already
+    // has them attached and skip re-adding them.
+    {
+        let mut attached = state.voice_runtime.attached_peers.lock().await;
+        attached.remove(&key);
+        for set in attached.values_mut() {
+            set.remove(username);
+        }
+    }
 }
