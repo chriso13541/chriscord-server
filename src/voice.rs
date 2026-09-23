@@ -63,6 +63,7 @@ use webrtc::rtp_transceiver::rtp_transceiver_direction::RTCRtpTransceiverDirecti
 use webrtc::rtp_transceiver::rtp_codec::{RTCRtpCodecCapability, RTCRtpHeaderExtensionCapability, RTPCodecType};
 use webrtc::rtp_transceiver::rtp_receiver::RTCRtpReceiver;
 use webrtc::rtp_transceiver::RTCRtpTransceiver;
+use webrtc::rtp_transceiver::RTCRtpTransceiverInit;
 use webrtc::sdp::extmap::SDES_MID_URI;
 use webrtc::track::track_local::track_local_static_rtp::TrackLocalStaticRTP;
 use webrtc::track::track_local::{TrackLocal, TrackLocalWriter};
@@ -435,15 +436,24 @@ async fn renegotiate_one(
     board_id: &str,
 ) -> Result<(), String> {
     let username = &key.1;
-    let missing: Vec<String> = {
+    let board_members: Vec<String> = {
         let voice = state.voice.lock().unwrap();
-        let attached = state.voice_runtime.attached_peers.lock().await;
-        let already = attached.get(key).cloned().unwrap_or_default();
         voice
             .iter()
-            .filter(|(u, b)| **b == *board_id && *u != username && !already.contains(*u))
+            .filter(|(u, b)| **b == *board_id && *u != username)
             .map(|(u, _)| u.clone())
             .collect()
+        // voice's std::sync::MutexGuard is dropped here, at the end of this
+        // block — deliberately, before the .await just below. Holding a
+        // std::sync::Mutex guard across an await point isn't valid for a
+        // future a tokio::spawn'd task might run (it requires Send, and
+        // MutexGuard isn't), unlike the AsyncMutex guards used elsewhere in
+        // this file which are fine to hold across an await.
+    };
+    let missing: Vec<String> = {
+        let attached = state.voice_runtime.attached_peers.lock().await;
+        let already = attached.get(key).cloned().unwrap_or_default();
+        board_members.into_iter().filter(|u| !already.contains(u)).collect()
     };
     if missing.is_empty() {
         return Ok(());
