@@ -140,12 +140,6 @@ impl VoiceRuntime {
     }
 }
 
-impl Default for VoiceRuntime {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 /// Handles an incoming SDP offer for a (board, user) pair: tears down any
 /// existing connection for that exact pair, and returns the SDP answer to
 /// send back over the signaling WebSocket.
