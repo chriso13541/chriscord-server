@@ -30,6 +30,8 @@ struct ClientMsg {
     speaking:        Option<bool>,
     muted:           Option<bool>,
     deafened:        Option<bool>,
+    pfp_updated_at:  Option<i64>,
+    pfp_data:        Option<String>,
 }
 
 pub async fn ws_handler(
@@ -184,6 +186,40 @@ async fn handle_socket(socket: WebSocket, token: String, state: Arc<AppState>) {
                                     }
                                 }
                             }
+                            "pfp_info" => {
+                                // The client reports the Unix timestamp of when its own
+                                // picture last changed (0 means it has none at all) —
+                                // ask it to upload only if what we have cached, if
+                                // anything, doesn't match. A matching timestamp means
+                                // our cache is already current, so there's nothing to do.
+                                if let Some(updated_at) = cm.pfp_updated_at {
+                                    if updated_at > 0 && crate::pfp::cached_timestamp(&username) != Some(updated_at) {
+                                        send_to_user(&state, &username, serde_json::json!({
+                                            "type": "pfp_request",
+                                        }));
+                                    }
+                                }
+                            }
+                            "pfp_upload" => {
+                                if let (Some(data), Some(updated_at)) = (cm.pfp_data, cm.pfp_updated_at) {
+                                    use base64::Engine as _;
+                                    if let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(&data) {
+                                        if crate::pfp::save_cached(&username, &bytes, updated_at).is_ok() {
+                                            // Broadcast to everyone, not just a targeted
+                                            // send — anyone currently displaying this
+                                            // user's avatar (voice occupant list, member
+                                            // list, and so on) needs to know to refetch it.
+                                            let _ = state.tx.send(serde_json::json!({
+                                                "type": "pfp_updated", "username": username, "updated_at": updated_at,
+                                            }).to_string());
+                                        } else {
+                                            tracing::warn!("voice: failed to cache pfp for {username}");
+                                        }
+                                    } else {
+                                        tracing::warn!("voice: invalid base64 pfp data from {username}");
+                                    }
+                                }
+                            }
                             _ => {}
                         }
                     }
@@ -202,11 +238,12 @@ async fn handle_socket(socket: WebSocket, token: String, state: Arc<AppState>) {
                                 Some("voice_state") => true,
                                 Some("voice_speaking") => true,
                                 Some("voice_mute_state") => true,
+                                Some("pfp_updated") => true,
                                 Some("message") => true,
                                 Some("message_edit") | Some("message_delete") => subscribed_board.as_deref()
                                     .map(|bid| v["board_id"].as_str() == Some(bid))
                                     .unwrap_or(false),
-                                Some("voice_answer") | Some("voice_ice") | Some("voice_status_snapshot") | Some("voice_renegotiate") =>
+                                Some("voice_answer") | Some("voice_ice") | Some("voice_status_snapshot") | Some("voice_renegotiate") | Some("pfp_request") =>
                                     v["target"].as_str() == Some(username.as_str()),
                                 _ => false,
                             };

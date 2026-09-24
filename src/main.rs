@@ -3,6 +3,7 @@ mod auth;
 mod db;
 mod files;
 mod messages;
+mod pfp;
 mod preview;
 mod rooms;
 mod state;
@@ -80,6 +81,7 @@ async fn main() {
         .route("/api/upload", post(files::upload)
             .layer(DefaultBodyLimit::disable()))
         .route("/api/files/:filename",  get(files::serve_file))
+        .route("/api/pfp/:username",    get(pfp::serve_pfp))
         .route("/api/preview",          get(preview::get_preview))
         .route("/ws",                   get(ws::ws_handler))
         .layer(CorsLayer::permissive())
