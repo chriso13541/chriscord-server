@@ -4,13 +4,30 @@
 // course of development, with mute, deafen, and real two-way audio
 // between separate machines all confirmed working — it's no longer a
 // first draft. Worth knowing about the UDP networking setup specifically
-// (see ICE_UDP_PORT_MIN/MAX below): it went through a single-muxed-port
-// version briefly, which caused constant, audible roughness from every
-// participant's audio sharing one demux path, and was reverted back to
-// per-connection ports on a small fixed range instead. The
-// EphemeralUDP/UDPNetwork::Ephemeral API used here has been confirmed via
-// an actual successful `cargo build` against this project's exact pinned
-// dependency version, not just read off documentation.
+// (see ICE_UDP_PORT below): it's been through three iterations. First a
+// 100-port ephemeral range; then a single muxed port, which caused
+// constant, audible roughness and was reverted back to per-connection
+// ports on a smaller 20-port range; then, after real open-internet
+// testing with multiple external participants showed that fixed range
+// exhausting fast (each connection was gathering 5+ redundant host
+// candidates — one per virtual/VPN/Docker interface on the server
+// machine — multiplying how many ports one participant alone could
+// consume), back to the single muxed port a third time, this time paired
+// with an interface filter to cut that redundant candidate count down,
+// on the theory that the earlier roughness was from excess ICE traffic
+// sharing the socket rather than the single socket being inherently
+// unusable. If roughness shows up again after this change, that theory
+// was wrong and is the next thing to revisit — see ICE_UDP_PORT's own
+// comment for more on this reasoning.
+//
+// EphemeralUDP/UDPNetwork::Ephemeral (used in the second iteration above)
+// was confirmed via an actual successful `cargo build`. UDPMuxDefault
+// (used here) matches a real, executed test from webrtc-ice's own test
+// suite plus a real third-party production crate using the identical
+// pattern — not just a method signature, but code known to compile and
+// run elsewhere. set_interface_filter is confirmed against pion's own
+// official documentation, including its true=keep/false=exclude polarity,
+// for the identical API this Rust crate is a direct port of.
 //
 // Design — each participant's offer declares its own real shape upfront:
 // their own mic (transceiver 0) plus one receive-only placeholder per
@@ -46,13 +63,15 @@
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+use tokio::net::UdpSocket;
 use tokio::sync::Mutex as AsyncMutex;
 
 use webrtc::api::interceptor_registry::register_default_interceptors;
 use webrtc::api::media_engine::MediaEngine;
 use webrtc::api::setting_engine::SettingEngine;
 use webrtc::api::{APIBuilder, API};
-use webrtc::ice::udp_network::{EphemeralUDP, UDPNetwork};
+use webrtc::ice::udp_mux::{UDPMuxDefault, UDPMuxParams};
+use webrtc::ice::udp_network::UDPNetwork;
 use webrtc::ice_transport::ice_candidate::{RTCIceCandidate, RTCIceCandidateInit};
 use webrtc::ice_transport::ice_server::RTCIceServer;
 use webrtc::interceptor::registry::Registry;
@@ -74,24 +93,30 @@ use crate::state::AppState;
 /// (board_id, username) — a participant's identity within one voice board.
 type ParticipantKey = (String, String);
 
-/// Fixed range of UDP ports voice connections allocate from, instead of
-/// either the OS's full ephemeral range or a single shared, muxed socket.
-/// Each connection gets its own dedicated port and its own dedicated read
-/// path — deliberately reverted from a single muxed port after that
-/// caused constant, ongoing audio roughness: every participant's traffic
-/// sharing one demux path introduced enough jitter to be clearly audible,
-/// even at the low packet rates a small voice call produces. This range
-/// is much smaller than this project's first attempt at port-range
-/// scoping (100 ports) — 20 comfortably covers a self-hosted friend-group
-/// setup — while still avoiding the shared-socket bottleneck entirely.
-/// This is what makes it possible to open one small, specific firewall
-/// rule for voice traffic — e.g. `ufw allow 50000:50019/udp` — alongside
-/// 7070 for signaling, rather than opening tens of thousands of ports or
-/// disabling the firewall outright. If this range is ever changed, the
-/// firewall rule on whichever machine runs the server needs to change to
-/// match.
-const ICE_UDP_PORT_MIN: u16 = 50000;
-const ICE_UDP_PORT_MAX: u16 = 50019;
+/// The single UDP port every voice connection is muxed over, instead of
+/// each connection allocating its own from a range. All ICE traffic for
+/// every participant, in every call, shares this one bound socket — the
+/// library demuxes incoming packets to the right connection using each
+/// ICE agent's ufrag (present in the first STUN packet from a given
+/// address, part of the standard ICE/STUN handshake), then by source
+/// address after that — this is the same underlying idea as "tag traffic
+/// by its source port," just handled by the library rather than hand-
+/// rolled, and it's what makes exactly one small, fixed firewall/port-
+/// forwarding rule enough regardless of how many participants are on a
+/// call or how many are behind NATs of their own on the open internet.
+///
+/// This project tried this once before and reverted it after seeing
+/// constant, audible roughness with it — but that test ran with every
+/// connection also gathering 5+ redundant host candidates per participant
+/// (one per virtual/VPN/Docker interface on the server machine, on top of
+/// the one that actually mattered), all sharing this same socket. The
+/// interface filter below exists specifically to cut that down; if
+/// roughness shows up again after this change, that's the next thing to
+/// suspect, but the two problems (too many ports needed, and too much
+/// redundant ICE traffic sharing one socket) share the same root cause,
+/// so it's worth trying together rather than assuming the single port
+/// alone was ever the actual problem.
+const ICE_UDP_PORT: u16 = 50000;
 
 pub struct VoiceRuntime {
     api: API,
@@ -112,7 +137,7 @@ pub struct VoiceRuntime {
 }
 
 impl VoiceRuntime {
-    pub fn new() -> Self {
+    pub async fn new() -> Self {
         let mut media_engine = MediaEngine::default();
         media_engine
             .register_default_codecs()
@@ -144,10 +169,31 @@ impl VoiceRuntime {
         let mut registry = Registry::new();
         registry = register_default_interceptors(registry, &mut media_engine)
             .expect("register default interceptors");
-        let ephemeral_range = EphemeralUDP::new(ICE_UDP_PORT_MIN, ICE_UDP_PORT_MAX)
-            .expect("ICE_UDP_PORT_MIN..ICE_UDP_PORT_MAX is a valid range");
+        let socket = UdpSocket::bind(("0.0.0.0", ICE_UDP_PORT))
+            .await
+            .expect("failed to bind voice UDP mux port — is something else already using it?");
+        let udp_mux = UDPMuxDefault::new(UDPMuxParams::new(socket));
         let mut setting_engine = SettingEngine::default();
-        setting_engine.set_udp_network(UDPNetwork::Ephemeral(ephemeral_range));
+        setting_engine.set_udp_network(UDPNetwork::Muxed(udp_mux));
+        // Excludes common virtual/VPN/container interface name patterns
+        // from ICE candidate gathering — confirmed true=keep/false=exclude
+        // against pion's own documentation for this identical API (this
+        // Rust crate is an explicit port of it). Logged at info level (the
+        // default visible level, no RUST_LOG needed) specifically so it's
+        // easy to confirm which interfaces actually got excluded on a
+        // given machine, since this project has no visibility into what
+        // any particular server host's real interface list looks like.
+        setting_engine.set_interface_filter(Box::new(|interface_name: &str| {
+            let excluded_prefixes = [
+                "docker", "veth", "br-", "tun", "tap", "wg", "vbox", "vmnet", "virbr",
+            ];
+            let keep = !excluded_prefixes.iter().any(|p| interface_name.starts_with(p));
+            tracing::info!(
+                "voice: ICE interface {interface_name}: {}",
+                if keep { "included" } else { "excluded" }
+            );
+            keep
+        }));
         let api = APIBuilder::new()
             .with_setting_engine(setting_engine)
             .with_media_engine(media_engine)
