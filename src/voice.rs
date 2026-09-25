@@ -4,30 +4,35 @@
 // course of development, with mute, deafen, and real two-way audio
 // between separate machines all confirmed working — it's no longer a
 // first draft. Worth knowing about the UDP networking setup specifically
-// (see ICE_UDP_PORT below): it's been through three iterations. First a
-// 100-port ephemeral range; then a single muxed port, which caused
-// constant, audible roughness and was reverted back to per-connection
-// ports on a smaller 20-port range; then, after real open-internet
-// testing with multiple external participants showed that fixed range
-// exhausting fast (each connection was gathering 5+ redundant host
+// (see ICE_UDP_PORT_MIN/MAX below): it's been through four iterations.
+// First a 100-port ephemeral range; then a single muxed port, which
+// caused constant, audible roughness and was reverted back to per-
+// connection ports on a smaller 20-port range; then, after real open-
+// internet testing with multiple external participants showed that fixed
+// range exhausting fast (each connection was gathering 5+ redundant host
 // candidates — one per virtual/VPN/Docker interface on the server
 // machine — multiplying how many ports one participant alone could
-// consume), back to the single muxed port a third time, this time paired
-// with an interface filter to cut that redundant candidate count down,
-// on the theory that the earlier roughness was from excess ICE traffic
-// sharing the socket rather than the single socket being inherently
-// unusable. If roughness shows up again after this change, that theory
-// was wrong and is the next thing to revisit — see ICE_UDP_PORT's own
-// comment for more on this reasoning.
+// consume), a single muxed port again, this time paired with an
+// interface filter, on the theory that the earlier roughness was from
+// excess ICE traffic sharing the socket rather than the socket itself
+// being unusable. That combination still failed outright — not roughness
+// this time, but a connection that never got audio at all, with the
+// server's own ICE agent continuously logging "Discarded message, not a
+// valid remote candidate." Confirmed over plain LAN with no NAT or
+// external routing involved at all, which rules out anything path- or
+// NAT-related. Back to a (now 100-port again) range as a result — see
+// ICE_UDP_PORT_MIN's own comment both for why the interface filter (kept
+// from the single-port attempt) is what actually addresses the original
+// port-exhaustion concern without needing a single port to do it, and for
+// the likely actual root cause found afterward, which points at the
+// single-muxed-port mechanism itself as structurally unreliable on a
+// machine shaped like this one, not at anything version-specific.
 //
-// EphemeralUDP/UDPNetwork::Ephemeral (used in the second iteration above)
-// was confirmed via an actual successful `cargo build`. UDPMuxDefault
-// (used here) matches a real, executed test from webrtc-ice's own test
-// suite plus a real third-party production crate using the identical
-// pattern — not just a method signature, but code known to compile and
-// run elsewhere. set_interface_filter is confirmed against pion's own
-// official documentation, including its true=keep/false=exclude polarity,
-// for the identical API this Rust crate is a direct port of.
+// EphemeralUDP/UDPNetwork::Ephemeral (used here) was confirmed via an
+// actual successful `cargo build`. set_interface_filter is confirmed
+// against pion's own official documentation, including its
+// true=keep/false=exclude polarity, for the identical API this Rust
+// crate is a direct port of.
 //
 // Design — each participant's offer declares its own real shape upfront:
 // their own mic (transceiver 0) plus one receive-only placeholder per
@@ -63,15 +68,13 @@
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use tokio::net::UdpSocket;
 use tokio::sync::Mutex as AsyncMutex;
 
 use webrtc::api::interceptor_registry::register_default_interceptors;
 use webrtc::api::media_engine::MediaEngine;
 use webrtc::api::setting_engine::SettingEngine;
 use webrtc::api::{APIBuilder, API};
-use webrtc::ice::udp_mux::{UDPMuxDefault, UDPMuxParams};
-use webrtc::ice::udp_network::UDPNetwork;
+use webrtc::ice::udp_network::{EphemeralUDP, UDPNetwork};
 use webrtc::ice_transport::ice_candidate::{RTCIceCandidate, RTCIceCandidateInit};
 use webrtc::ice_transport::ice_server::RTCIceServer;
 use webrtc::interceptor::registry::Registry;
@@ -93,30 +96,41 @@ use crate::state::AppState;
 /// (board_id, username) — a participant's identity within one voice board.
 type ParticipantKey = (String, String);
 
-/// The single UDP port every voice connection is muxed over, instead of
-/// each connection allocating its own from a range. All ICE traffic for
-/// every participant, in every call, shares this one bound socket — the
-/// library demuxes incoming packets to the right connection using each
-/// ICE agent's ufrag (present in the first STUN packet from a given
-/// address, part of the standard ICE/STUN handshake), then by source
-/// address after that — this is the same underlying idea as "tag traffic
-/// by its source port," just handled by the library rather than hand-
-/// rolled, and it's what makes exactly one small, fixed firewall/port-
-/// forwarding rule enough regardless of how many participants are on a
-/// call or how many are behind NATs of their own on the open internet.
+/// Fixed range of UDP ports voice connections allocate from. Reverted back
+/// to this from a single muxed port after that caused two separate, real
+/// failures in this project's own testing — constant audible roughness
+/// the first time, and a connection that couldn't establish audio at all
+/// the second time (a continuous stream of "Discarded message, not a
+/// valid remote candidate" from the server's own ICE agent) — the second
+/// time even over plain LAN with no NAT or external routing involved at
+/// all, which ruled out anything path-related.
 ///
-/// This project tried this once before and reverted it after seeing
-/// constant, audible roughness with it — but that test ran with every
-/// connection also gathering 5+ redundant host candidates per participant
-/// (one per virtual/VPN/Docker interface on the server machine, on top of
-/// the one that actually mattered), all sharing this same socket. The
-/// interface filter below exists specifically to cut that down; if
-/// roughness shows up again after this change, that's the next thing to
-/// suspect, but the two problems (too many ports needed, and too much
-/// redundant ICE traffic sharing one socket) share the same root cause,
-/// so it's worth trying together rather than assuming the single port
-/// alone was ever the actual problem.
-const ICE_UDP_PORT: u16 = 50000;
+/// The likely actual root cause, found afterward: pion/ice#518 (still
+/// open as of this writing) describes this exact symptom on multihomed
+/// and/or dual-stack hosts — a single shared socket can end up unable to
+/// reliably match returning traffic back to the connection it belongs to
+/// when a machine has more than one local address in play, which this
+/// server's host does (multiple network interfaces, plus IPv6 present
+/// even though not fully functional — see the persistent IPv6-related
+/// warnings elsewhere in this project's own logs). That issue predates
+/// this project's pinned version by years and is still unresolved
+/// upstream, which is why a per-connection dedicated socket — no
+/// address-matching ambiguity possible, since nothing is shared — is
+/// trusted here over the single muxed port rather than continuing to
+/// chase a library version that might fix it.
+///
+/// This is paired with an interface filter (see set_interface_filter
+/// below) that's what actually solves the original reason a single port
+/// seemed necessary: without it, a single connection could gather 5+
+/// redundant host candidates — one per virtual/VPN/Docker interface on
+/// the server machine — each needing its own port, so a small range could
+/// exhaust with only a handful of real participants. With the filter
+/// restricting gathering to just the one real interface, each connection
+/// needs only one port again, so a 100-port range comfortably covers far
+/// more simultaneous participants than the original 20-port range could
+/// have managed even before the filter existed.
+const ICE_UDP_PORT_MIN: u16 = 50000;
+const ICE_UDP_PORT_MAX: u16 = 50099;
 
 pub struct VoiceRuntime {
     api: API,
@@ -137,7 +151,7 @@ pub struct VoiceRuntime {
 }
 
 impl VoiceRuntime {
-    pub async fn new() -> Self {
+    pub fn new() -> Self {
         let mut media_engine = MediaEngine::default();
         media_engine
             .register_default_codecs()
@@ -169,12 +183,10 @@ impl VoiceRuntime {
         let mut registry = Registry::new();
         registry = register_default_interceptors(registry, &mut media_engine)
             .expect("register default interceptors");
-        let socket = UdpSocket::bind(("0.0.0.0", ICE_UDP_PORT))
-            .await
-            .expect("failed to bind voice UDP mux port — is something else already using it?");
-        let udp_mux = UDPMuxDefault::new(UDPMuxParams::new(socket));
+        let ephemeral_range = EphemeralUDP::new(ICE_UDP_PORT_MIN, ICE_UDP_PORT_MAX)
+            .expect("ICE_UDP_PORT_MIN..ICE_UDP_PORT_MAX is a valid range");
         let mut setting_engine = SettingEngine::default();
-        setting_engine.set_udp_network(UDPNetwork::Muxed(udp_mux));
+        setting_engine.set_udp_network(UDPNetwork::Ephemeral(ephemeral_range));
         // Filters which network interfaces ICE gathers candidates from —
         // confirmed true=keep/false=exclude against pion's own
         // documentation for this identical API (this Rust crate is an
@@ -275,10 +287,20 @@ pub async fn handle_offer(
     }
 
     let config = RTCConfiguration {
-        ice_servers: vec![RTCIceServer {
-            urls: vec!["stun:stun.l.google.com:19302".to_owned()],
-            ..Default::default()
-        }],
+        // Two independent STUN providers rather than one — candidate
+        // gathering shouldn't fail outright just because one provider has
+        // a transient outage or is rate-limiting, which would otherwise
+        // be indistinguishable from a genuine NAT traversal failure.
+        ice_servers: vec![
+            RTCIceServer {
+                urls: vec!["stun:stun.l.google.com:19302".to_owned()],
+                ..Default::default()
+            },
+            RTCIceServer {
+                urls: vec!["stun:stun.cloudflare.com:3478".to_owned()],
+                ..Default::default()
+            },
+        ],
         ..Default::default()
     };
     let pc = Arc::new(
