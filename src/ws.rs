@@ -49,10 +49,10 @@ async fn handle_socket(socket: WebSocket, token: String, state: Arc<AppState>) {
     };
 
     { let mut o = state.online.lock().unwrap(); *o.entry(username.clone()).or_insert(0) += 1; }
+    let mut rx = state.tx.subscribe();
     broadcast_users(&state);
     broadcast_voice_state(&state);
 
-    let mut rx = state.tx.subscribe();
     let mut subscribed_board: Option<String> = None;
     let (mut sink, mut stream) = socket.split();
 
