@@ -203,8 +203,11 @@ async fn handle_socket(socket: WebSocket, token: String, state: Arc<AppState>) {
                             "pfp_upload" => {
                                 if let (Some(data), Some(updated_at)) = (cm.pfp_data, cm.pfp_updated_at) {
                                     use base64::Engine as _;
+                                    tracing::info!("voice: pfp_upload from {username}: {} base64 chars", data.len());
                                     if let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(&data) {
+                                        tracing::info!("voice: pfp_upload from {username}: decoded to {} bytes", bytes.len());
                                         if crate::pfp::save_cached(&username, &bytes, updated_at).is_ok() {
+                                            tracing::info!("voice: cached {} bytes for {username}", bytes.len());
                                             // Broadcast to everyone, not just a targeted
                                             // send — anyone currently displaying this
                                             // user's avatar (voice occupant list, member

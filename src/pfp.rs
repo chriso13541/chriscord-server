@@ -103,11 +103,14 @@ pub async fn serve_pfp(
     };
     let path = pfps_dir().join(format!("{username}.png"));
     match std::fs::read(&path) {
-        Ok(data) => Response::builder()
-            .status(StatusCode::OK)
-            .header(header::CONTENT_TYPE, "image/png")
-            .body(Body::from(data))
-            .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response()),
+        Ok(data) => {
+            tracing::info!("voice: serving {} bytes for {username}'s pfp", data.len());
+            Response::builder()
+                .status(StatusCode::OK)
+                .header(header::CONTENT_TYPE, "image/png")
+                .body(Body::from(data))
+                .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
+        }
         Err(_) => StatusCode::NOT_FOUND.into_response(),
     }
 }
