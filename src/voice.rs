@@ -506,6 +506,11 @@ async fn renegotiate_others_for_new_source(state: &Arc<AppState>, board_id: &str
             .map(|(k, pc)| (k.clone(), Arc::clone(pc)))
             .collect()
     };
+    tracing::info!(
+        "voice: {new_username} joined board {board_id}, renegotiating {} existing connection(s): {:?}",
+        others.len(),
+        others.iter().map(|(k, _)| &k.1).collect::<Vec<_>>()
+    );
     for (key, pc) in others {
         if let Err(e) = renegotiate_one(state, &key, &pc, board_id).await {
             tracing::warn!("voice: renegotiation failed for {}: {e}", key.1);
@@ -551,8 +556,10 @@ async fn renegotiate_one(
         board_members.into_iter().filter(|u| !already.contains(u)).collect()
     };
     if missing.is_empty() {
+        tracing::info!("voice: renegotiate_one for {username}: nothing missing, no-op");
         return Ok(());
     }
+    tracing::info!("voice: renegotiate_one for {username}: missing={missing:?}");
 
     let mut newly_attached = Vec::new();
     {
@@ -560,6 +567,7 @@ async fn renegotiate_one(
         for other in &missing {
             let other_key = (board_id.to_string(), other.clone());
             let Some(track) = sources.get(&other_key) else {
+                tracing::info!("voice: renegotiate_one for {username}: {other}'s source not ready yet, skipping this round");
                 continue; // that other participant hasn't finished negotiating yet
             };
             let transceiver = pc
@@ -580,6 +588,7 @@ async fn renegotiate_one(
         }
     }
     if newly_attached.is_empty() {
+        tracing::info!("voice: renegotiate_one for {username}: everyone missing was still mid-negotiation, no-op this round");
         return Ok(()); // everyone missing was still mid-negotiation — nothing to renegotiate yet
     }
 
@@ -590,9 +599,10 @@ async fn renegotiate_one(
 
     {
         let mut attached = state.voice_runtime.attached_peers.lock().await;
-        attached.entry(key.clone()).or_default().extend(newly_attached);
+        attached.entry(key.clone()).or_default().extend(newly_attached.clone());
     }
 
+    tracing::info!("voice: renegotiate_one sending offer to {username}, newly attached: {newly_attached:?}");
     crate::ws::send_to_user(
         state,
         username,
@@ -616,14 +626,16 @@ pub async fn handle_renegotiate_answer(
 ) {
     let key: ParticipantKey = (board_id.to_string(), username.to_string());
     let Some(pc) = state.voice_runtime.connections.lock().await.get(&key).cloned() else {
+        tracing::warn!("voice: got a renegotiation answer from {username} but no matching connection exists");
         return;
     };
     let Ok(remote_desc) = RTCSessionDescription::answer(answer_sdp.to_string()) else {
         tracing::warn!("voice: invalid renegotiation answer SDP from {username}");
         return;
     };
-    if let Err(e) = pc.set_remote_description(remote_desc).await {
-        tracing::warn!("voice: set_remote_description failed for {username}'s renegotiation answer: {e}");
+    match pc.set_remote_description(remote_desc).await {
+        Ok(()) => tracing::info!("voice: applied {username}'s renegotiation answer successfully"),
+        Err(e) => tracing::warn!("voice: set_remote_description failed for {username}'s renegotiation answer: {e}"),
     }
 }
 
