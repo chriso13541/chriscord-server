@@ -175,19 +175,46 @@ impl VoiceRuntime {
         let udp_mux = UDPMuxDefault::new(UDPMuxParams::new(socket));
         let mut setting_engine = SettingEngine::default();
         setting_engine.set_udp_network(UDPNetwork::Muxed(udp_mux));
-        // Excludes common virtual/VPN/container interface name patterns
-        // from ICE candidate gathering — confirmed true=keep/false=exclude
-        // against pion's own documentation for this identical API (this
-        // Rust crate is an explicit port of it). Logged at info level (the
-        // default visible level, no RUST_LOG needed) specifically so it's
-        // easy to confirm which interfaces actually got excluded on a
-        // given machine, since this project has no visibility into what
-        // any particular server host's real interface list looks like.
-        setting_engine.set_interface_filter(Box::new(|interface_name: &str| {
-            let excluded_prefixes = [
-                "docker", "veth", "br-", "tun", "tap", "wg", "vbox", "vmnet", "virbr",
-            ];
-            let keep = !excluded_prefixes.iter().any(|p| interface_name.starts_with(p));
+        // Filters which network interfaces ICE gathers candidates from —
+        // confirmed true=keep/false=exclude against pion's own
+        // documentation for this identical API (this Rust crate is an
+        // explicit port of it). Logged at info level (the default visible
+        // level, no RUST_LOG needed) so it's easy to confirm which
+        // interfaces actually got included or excluded on a given machine.
+        // The interface(s) ICE should actually gather candidates from can
+        // be set explicitly via CHRISCORD_ICE_INTERFACES — a comma-
+        // separated list of exact interface names, e.g. "eth0" or
+        // "eth0,wlan0". This takes priority whenever set, and is the
+        // precise, no-guessing alternative to the exclusion heuristic
+        // below: find the right value with `ip route get 8.8.8.8` (the
+        // name shown after "dev" is the interface actually used to reach
+        // the internet) or `ip addr` (match against whichever IP is
+        // already known to be the real one). Without it set, this falls
+        // back to excluding common virtual/VPN/container interface name
+        // patterns — a reasonable default, but a guess at naming
+        // conventions rather than a confirmed fit for any specific
+        // machine, since this project has no way to know a given server
+        // host's actual interface list ahead of time.
+        let explicit_interfaces: Vec<String> = std::env::var("CHRISCORD_ICE_INTERFACES")
+            .ok()
+            .map(|v| v.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect())
+            .unwrap_or_default();
+        if explicit_interfaces.is_empty() {
+            tracing::info!(
+                "voice: CHRISCORD_ICE_INTERFACES not set — falling back to excluding common virtual/VPN/container interface name patterns"
+            );
+        } else {
+            tracing::info!("voice: CHRISCORD_ICE_INTERFACES set — only gathering candidates from: {explicit_interfaces:?}");
+        }
+        setting_engine.set_interface_filter(Box::new(move |interface_name: &str| {
+            let keep = if explicit_interfaces.is_empty() {
+                let excluded_prefixes = [
+                    "docker", "veth", "br-", "tun", "tap", "wg", "vbox", "vmnet", "virbr",
+                ];
+                !excluded_prefixes.iter().any(|p| interface_name.starts_with(p))
+            } else {
+                explicit_interfaces.iter().any(|i| i == interface_name)
+            };
             tracing::info!(
                 "voice: ICE interface {interface_name}: {}",
                 if keep { "included" } else { "excluded" }
