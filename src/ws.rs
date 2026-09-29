@@ -169,6 +169,10 @@ async fn handle_socket(socket: WebSocket, token: String, state: Arc<AppState>) {
                                             "type": "voice_speaking", "board_id": bid,
                                             "username": username, "speaking": speaking,
                                         }).to_string());
+                                    } else {
+                                        // Dropped as stale — worth seeing if someone's ring
+                                        // ever fails to show for everyone else.
+                                        tracing::warn!("voice: ignoring speaking={speaking} from {username} for board {bid}: not in that voice channel");
                                     }
                                 }
                             }
