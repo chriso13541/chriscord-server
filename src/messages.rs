@@ -338,15 +338,24 @@ pub async fn edit_message(
         .map_err(|_| db_err())?.ok_or_else(unauth)?;
 
     let content = body.content.trim().to_string();
-    if content.is_empty() {
-        return Err((StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": "Content cannot be empty" }))));
-    }
 
-    let row = sqlx::query("SELECT username, board_id FROM messages WHERE id = ?")
+    let row = sqlx::query("SELECT username, board_id, attachments FROM messages WHERE id = ?")
         .bind(&id).fetch_optional(&s.pool).await.map_err(|_| db_err())?
         .ok_or_else(not_found)?;
 
     if row.get::<String, _>("username") != username { return Err(forbidden()); }
+    // Empty text is fine on a message that still has attachments (an
+    // image-only message, like when it was first sent); a message with
+    // neither would be blank, so that's still refused.
+    if content.is_empty() {
+        let attachments: Option<String> = row.try_get("attachments").ok().flatten();
+        let has_attachments = attachments
+            .and_then(|a| serde_json::from_str::<Vec<serde_json::Value>>(&a).ok())
+            .is_some_and(|v| !v.is_empty());
+        if !has_attachments {
+            return Err((StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": "Content cannot be empty" }))));
+        }
+    }
     let board_id: String = row.get("board_id");
 
     sqlx::query("UPDATE messages SET content = ?, edited = 1 WHERE id = ?")
