@@ -247,7 +247,13 @@ async fn handle_socket(socket: WebSocket, token: String, state: Arc<AppState>) {
                                 Some("users") => true,
                                 Some("rooms_updated") => true,
                                 Some("voice_state") => true,
-                                Some("voice_speaking") => true,
+                                // Speaking rings are only for people in that same call —
+                                // someone just browsing the server still gets voice_state
+                                // (who's in which channel) but no activity.
+                                Some("voice_speaking") => {
+                                    let my_board = state.voice.lock().unwrap().get(&username).cloned();
+                                    my_board.as_deref().is_some() && v["board_id"].as_str() == my_board.as_deref()
+                                }
                                 Some("voice_mute_state") => true,
                                 Some("pfp_updated") => true,
                                 Some("message") => true,
