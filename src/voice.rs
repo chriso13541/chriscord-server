@@ -3,36 +3,11 @@
 // This file has been built and run successfully multiple times over the
 // course of development, with mute, deafen, and real two-way audio
 // between separate machines all confirmed working — it's no longer a
-// first draft. Worth knowing about the UDP networking setup specifically
-// (see ICE_UDP_PORT_MIN/MAX below): it's been through four iterations.
-// First a 100-port ephemeral range; then a single muxed port, which
-// caused constant, audible roughness and was reverted back to per-
-// connection ports on a smaller 20-port range; then, after real open-
-// internet testing with multiple external participants showed that fixed
-// range exhausting fast (each connection was gathering 5+ redundant host
-// candidates — one per virtual/VPN/Docker interface on the server
-// machine — multiplying how many ports one participant alone could
-// consume), a single muxed port again, this time paired with an
-// interface filter, on the theory that the earlier roughness was from
-// excess ICE traffic sharing the socket rather than the socket itself
-// being unusable. That combination still failed outright — not roughness
-// this time, but a connection that never got audio at all, with the
-// server's own ICE agent continuously logging "Discarded message, not a
-// valid remote candidate." Confirmed over plain LAN with no NAT or
-// external routing involved at all, which rules out anything path- or
-// NAT-related. Back to a (now 100-port again) range as a result — see
-// ICE_UDP_PORT_MIN's own comment both for why the interface filter (kept
-// from the single-port attempt) is what actually addresses the original
-// port-exhaustion concern without needing a single port to do it, and for
-// the likely actual root cause found afterward, which points at the
-// single-muxed-port mechanism itself as structurally unreliable on a
-// machine shaped like this one, not at anything version-specific.
-//
-// EphemeralUDP/UDPNetwork::Ephemeral (used here) was confirmed via an
-// actual successful `cargo build`. set_interface_filter is confirmed
-// against pion's own official documentation, including its
-// true=keep/false=exclude polarity, for the identical API this Rust
-// crate is a direct port of.
+// first draft. Worth knowing about the UDP networking setup specifically:
+// all voice traffic now runs over ONE muxed UDP port (ICE_UDP_PORT, the
+// same number as the HTTP/WebSocket port, so the router only needs 7070
+// forwarded as TCP+UDP). See ICE_UDP_PORT's own comment for why earlier
+// single-port attempts failed and what makes this one work.
 //
 // Design — each participant's offer declares its own real shape upfront:
 // their own mic (transceiver 0) plus one receive-only placeholder per
@@ -68,14 +43,18 @@
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+use tokio::net::UdpSocket;
 use tokio::sync::Mutex as AsyncMutex;
 
 use webrtc::api::interceptor_registry::register_default_interceptors;
 use webrtc::api::media_engine::MediaEngine;
 use webrtc::api::setting_engine::SettingEngine;
 use webrtc::api::{APIBuilder, API};
-use webrtc::ice::udp_network::{EphemeralUDP, UDPNetwork};
+use webrtc::ice::network_type::NetworkType;
+use webrtc::ice::udp_mux::{UDPMuxDefault, UDPMuxParams};
+use webrtc::ice::udp_network::UDPNetwork;
 use webrtc::ice_transport::ice_candidate::{RTCIceCandidate, RTCIceCandidateInit};
+use webrtc::ice_transport::ice_candidate_type::RTCIceCandidateType;
 use webrtc::ice_transport::ice_server::RTCIceServer;
 use webrtc::interceptor::registry::Registry;
 use webrtc::peer_connection::configuration::RTCConfiguration;
@@ -96,41 +75,35 @@ use crate::state::AppState;
 /// (board_id, username) — a participant's identity within one voice board.
 type ParticipantKey = (String, String);
 
-/// Fixed range of UDP ports voice connections allocate from. Reverted back
-/// to this from a single muxed port after that caused two separate, real
-/// failures in this project's own testing — constant audible roughness
-/// the first time, and a connection that couldn't establish audio at all
-/// the second time (a continuous stream of "Discarded message, not a
-/// valid remote candidate" from the server's own ICE agent) — the second
-/// time even over plain LAN with no NAT or external routing involved at
-/// all, which ruled out anything path-related.
+/// The single UDP port all voice connections share (muxed by ICE ufrag,
+/// then by remote address). Deliberately the same number as the TCP
+/// HTTP/WebSocket port so the router only needs 7070 forwarded as TCP+UDP.
 ///
-/// The likely actual root cause, found afterward: pion/ice#518 (still
-/// open as of this writing) describes this exact symptom on multihomed
-/// and/or dual-stack hosts — a single shared socket can end up unable to
-/// reliably match returning traffic back to the connection it belongs to
-/// when a machine has more than one local address in play, which this
-/// server's host does (multiple network interfaces, plus IPv6 present
-/// even though not fully functional — see the persistent IPv6-related
-/// warnings elsewhere in this project's own logs). That issue predates
-/// this project's pinned version by years and is still unresolved
-/// upstream, which is why a per-connection dedicated socket — no
-/// address-matching ambiguity possible, since nothing is shared — is
-/// trusted here over the single muxed port rather than continuing to
-/// chase a library version that might fix it.
+/// Why the earlier single-port attempts failed (roughness the first time,
+/// no audio at all the second, with "Discarded message, not a valid remote
+/// candidate" in the log): in webrtc-ice 0.11, gather_candidates_local_
+/// udp_mux creates one host candidate per local IP that passes the
+/// filters, all sharing the muxed socket, and start_candidate spawns a
+/// separate recv_loop per candidate on that same socket. Those loops race
+/// for every packet, and each validates a packet against its OWN
+/// candidate's network type — so e.g. an IPv6 candidate's loop reading a
+/// packet from an IPv4 client drops it. The interface filter didn't help
+/// because it filters interfaces, not address families: the real
+/// interface still contributed its IPv6 addresses.
 ///
-/// This is paired with an interface filter (see set_interface_filter
-/// below) that's what actually solves the original reason a single port
-/// seemed necessary: without it, a single connection could gather 5+
-/// redundant host candidates — one per virtual/VPN/Docker interface on
-/// the server machine — each needing its own port, so a small range could
-/// exhaust with only a handful of real participants. With the filter
-/// restricting gathering to just the one real interface, each connection
-/// needs only one port again, so a 100-port range comfortably covers far
-/// more simultaneous participants than the original 20-port range could
-/// have managed even before the filter existed.
-const ICE_UDP_PORT_MIN: u16 = 50000;
-const ICE_UDP_PORT_MAX: u16 = 50099;
+/// The fix is to guarantee exactly ONE host candidate per connection:
+/// IPv4-only gathering (set_network_types) plus, optionally, pinning one
+/// exact IP (CHRISCORD_ICE_IP via set_ip_filter). With one candidate there
+/// is one reader, and nothing to misroute.
+///
+/// Note that muxed mode skips STUN (server-reflexive) gathering entirely
+/// (agent_gather.rs), so for clients outside the LAN the server's public
+/// IP must be advertised explicitly via CHRISCORD_PUBLIC_IP
+/// (set_nat_1to1_ips). LAN clients still connect: the server's own
+/// connectivity checks to their LAN host candidate let them learn the
+/// server's LAN address as a peer-reflexive candidate (and router NAT
+/// loopback covers it otherwise).
+const ICE_UDP_PORT: u16 = 7070;
 
 pub struct VoiceRuntime {
     api: API,
@@ -151,7 +124,7 @@ pub struct VoiceRuntime {
 }
 
 impl VoiceRuntime {
-    pub fn new() -> Self {
+    pub async fn new() -> Self {
         let mut media_engine = MediaEngine::default();
         media_engine
             .register_default_codecs()
@@ -183,10 +156,39 @@ impl VoiceRuntime {
         let mut registry = Registry::new();
         registry = register_default_interceptors(registry, &mut media_engine)
             .expect("register default interceptors");
-        let ephemeral_range = EphemeralUDP::new(ICE_UDP_PORT_MIN, ICE_UDP_PORT_MAX)
-            .expect("ICE_UDP_PORT_MIN..ICE_UDP_PORT_MAX is a valid range");
+        let socket = UdpSocket::bind(("0.0.0.0", ICE_UDP_PORT))
+            .await
+            .expect("failed to bind voice UDP port — is something else already using it?");
+        tracing::info!("voice: all voice traffic muxed over UDP port {ICE_UDP_PORT}");
+        let udp_mux = UDPMuxDefault::new(UDPMuxParams::new(socket));
         let mut setting_engine = SettingEngine::default();
-        setting_engine.set_udp_network(UDPNetwork::Ephemeral(ephemeral_range));
+        setting_engine.set_udp_network(UDPNetwork::Muxed(udp_mux));
+        // IPv4 only — this is what stops IPv6 addresses on the real
+        // interface from adding extra candidates (and extra readers) on the
+        // shared socket. See ICE_UDP_PORT's comment.
+        setting_engine.set_network_types(vec![NetworkType::Udp4]);
+        // Optionally pin the single exact IP to gather from, e.g.
+        // CHRISCORD_ICE_IP=192.168.1.50 — useful if the chosen interface
+        // has more than one IPv4 address.
+        if let Ok(ip) = std::env::var("CHRISCORD_ICE_IP") {
+            let wanted: std::net::IpAddr = ip
+                .trim()
+                .parse()
+                .expect("CHRISCORD_ICE_IP must be a valid IP address");
+            tracing::info!("voice: CHRISCORD_ICE_IP set — only gathering from {wanted}");
+            setting_engine.set_ip_filter(Box::new(move |addr: std::net::IpAddr| addr == wanted));
+        }
+        // Advertise the public IP for clients outside the LAN (muxed mode
+        // does no STUN gathering). e.g. CHRISCORD_PUBLIC_IP=203.0.113.7
+        match std::env::var("CHRISCORD_PUBLIC_IP") {
+            Ok(public_ip) if !public_ip.trim().is_empty() => {
+                tracing::info!("voice: advertising public IP {} for voice", public_ip.trim());
+                setting_engine.set_nat_1to1_ips(vec![public_ip.trim().to_string()], RTCIceCandidateType::Host);
+            }
+            _ => tracing::info!(
+                "voice: CHRISCORD_PUBLIC_IP not set — only LAN clients will be able to connect to voice"
+            ),
+        }
         // Filters which network interfaces ICE gathers candidates from —
         // confirmed true=keep/false=exclude against pion's own
         // documentation for this identical API (this Rust crate is an
@@ -287,10 +289,11 @@ pub async fn handle_offer(
     }
 
     let config = RTCConfiguration {
-        // Two independent STUN providers rather than one — candidate
-        // gathering shouldn't fail outright just because one provider has
-        // a transient outage or is rate-limiting, which would otherwise
-        // be indistinguishable from a genuine NAT traversal failure.
+        // Note: with the muxed UDP port, webrtc-ice 0.11 skips STUN
+        // gathering entirely, so these servers are currently unused — the
+        // public address comes from CHRISCORD_PUBLIC_IP instead (see
+        // ICE_UDP_PORT). Kept so switching back to an ephemeral port range
+        // wouldn't also need this restored.
         ice_servers: vec![
             RTCIceServer {
                 urls: vec!["stun:stun.l.google.com:19302".to_owned()],

@@ -46,7 +46,7 @@ async fn main() {
         challenges: Mutex::new(HashMap::new()),
         voice:      Mutex::new(HashMap::new()),
         voice_status: Mutex::new(HashMap::new()),
-        voice_runtime: voice::VoiceRuntime::new(),
+        voice_runtime: voice::VoiceRuntime::new().await,
     });
 
     println!();
@@ -55,7 +55,7 @@ async fn main() {
     println!("  ╠══════════════════════════════════════════╣");
     println!("  ║  Owner key : {}  ║", &owner_key);
     println!("  ║  Admin UI  : http://0.0.0.0:7070/admin   ║");
-    println!("  ║  Port      : 7070                         ║");
+    println!("  ║  Port      : 7070 (TCP + UDP)             ║");
     println!("  ╚══════════════════════════════════════════╝");
     println!();
 
