@@ -257,7 +257,7 @@ async fn handle_socket(socket: WebSocket, token: String, state: Arc<AppState>) {
                                 Some("voice_mute_state") => true,
                                 Some("pfp_updated") => true,
                                 Some("message") => true,
-                                Some("message_edit") | Some("message_delete") => subscribed_board.as_deref()
+                                Some("message_edit") | Some("message_delete") | Some("message_pin") => subscribed_board.as_deref()
                                     .map(|bid| v["board_id"].as_str() == Some(bid))
                                     .unwrap_or(false),
                                 Some("voice_answer") | Some("voice_ice") | Some("voice_status_snapshot") | Some("voice_renegotiate") | Some("pfp_request") =>
@@ -330,7 +330,7 @@ async fn load_history(state: &Arc<AppState>, board_id: &str) -> Vec<serde_json::
     let mut rows = match sqlx::query(
         "SELECT id, board_id, username, content,
                 attachment_url, attachment_name, attachment_mime,
-                attachments, edited, created_at
+                attachments, edited, created_at, pinned_at
          FROM messages WHERE board_id = ? ORDER BY id DESC LIMIT ?",
     ).bind(board_id).bind(HISTORY_PAGE).fetch_all(&state.pool).await {
         Ok(r) => r,
@@ -361,7 +361,7 @@ async fn save_and_broadcast(
 
     let msg = crate::messages::ChatMessage {
         id, board_id: board_id.to_string(), username: username.to_string(),
-        content: content.to_string(), attachments, edited: false, created_at: now,
+        content: content.to_string(), attachments, edited: false, created_at: now, pinned: false,
     };
     let _ = state.tx.send(serde_json::json!({ "type": "message", "data": msg }).to_string());
 }

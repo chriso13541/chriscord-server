@@ -13,7 +13,7 @@ mod ws;
 
 use axum::{
     extract::DefaultBodyLimit,
-    routing::{delete, get, patch, post},
+    routing::{delete, get, patch, post, put},
     Router,
 };
 use std::collections::HashMap;
@@ -79,6 +79,8 @@ async fn main() {
         .route("/api/search", get(messages::search_messages))
         .route("/api/messages/:id",
             patch(messages::edit_message).delete(messages::delete_message))
+        .route("/api/boards/:id/pins",   get(messages::get_pins))
+        .route("/api/messages/:id/pin",  put(messages::pin_message).delete(messages::unpin_message))
         .route("/api/upload", post(files::upload)
             .layer(DefaultBodyLimit::disable()))
         .route("/api/files/:filename",  get(files::serve_file))

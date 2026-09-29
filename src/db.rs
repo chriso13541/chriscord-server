@@ -108,6 +108,10 @@ pub async fn init() -> Result<SqlitePool, sqlx::Error> {
         "ALTER TABLE messages ADD COLUMN attachments TEXT",
         "ALTER TABLE sessions ADD COLUMN public_key  TEXT NOT NULL DEFAULT ''",
         "ALTER TABLE rooms    ADD COLUMN room_type   TEXT NOT NULL DEFAULT 'text'",
+        // Pinned messages: NULL = not pinned. pinned_at orders the pins list
+        // (most recently pinned first); pinned_by is who pinned it.
+        "ALTER TABLE messages ADD COLUMN pinned_at   TEXT",
+        "ALTER TABLE messages ADD COLUMN pinned_by   TEXT",
     ];
     for sql in migrations {
         let _ = sqlx::query(sql).execute(&pool).await;

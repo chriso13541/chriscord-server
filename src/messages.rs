@@ -51,6 +51,10 @@ pub struct ChatMessage {
     pub attachments: Vec<Attachment>,
     pub edited:      bool,
     pub created_at:  String,
+    /// Whether the message is pinned in its board. `default` so any JSON
+    /// produced before this field existed still deserializes.
+    #[serde(default)]
+    pub pinned:      bool,
 }
 
 /// A ChatMessage plus which board (and its room) it came from — only
@@ -118,13 +122,14 @@ pub fn row_to_msg(r: &sqlx::sqlite::SqliteRow) -> ChatMessage {
         attachments,
         edited:      r.try_get::<i64, _>("edited").unwrap_or(0) != 0,
         created_at:  r.get("created_at"),
+        pinned:      r.try_get::<Option<String>, _>("pinned_at").ok().flatten().is_some(),
     }
 }
 
 const SELECT: &str =
     "SELECT id, board_id, username, content,
             attachment_url, attachment_name, attachment_mime,
-            attachments, edited, created_at
+            attachments, edited, created_at, pinned_at
      FROM messages";
 
 // Same columns as SELECT above, plus the joined board's name and room —
@@ -132,7 +137,7 @@ const SELECT: &str =
 const SEARCH_SELECT: &str =
     "SELECT m.id, m.board_id, m.username, m.content,
             m.attachment_url, m.attachment_name, m.attachment_mime,
-            m.attachments, m.edited, m.created_at,
+            m.attachments, m.edited, m.created_at, m.pinned_at,
             b.name AS board_name, b.room_id AS room_id
      FROM messages m JOIN boards b ON m.board_id = b.id";
 
@@ -323,7 +328,7 @@ pub async fn post_message(
     .bind(&attachments_json).bind(&now)
     .execute(&s.pool).await.map_err(|_| db_err())?;
 
-    let msg = ChatMessage { id, board_id, username, content, attachments, edited: false, created_at: now };
+    let msg = ChatMessage { id, board_id, username, content, attachments, edited: false, created_at: now, pinned: false };
     let _ = s.tx.send(serde_json::json!({ "type": "message", "data": msg }).to_string());
     Ok(Json(msg))
 }
@@ -388,4 +393,68 @@ pub async fn delete_message(
         "type": "message_delete", "id": id, "board_id": board_id,
     }).to_string());
     Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+// ── Pins ──────────────────────────────────────────────────────────────────────
+//
+// Any member can pin or unpin any message: chriscord has no per-member
+// permissions yet (the admin panel is the only elevated role), and on a
+// small friends' server that matches how pins get used. If roles are added
+// later, this is the one check to tighten.
+
+/// GET /api/boards/:id/pins — the board's pinned messages, most recently
+/// pinned first (Discord's order).
+pub async fn get_pins(
+    headers:        HeaderMap,
+    Path(board_id): Path<String>,
+    State(s):       State<Arc<AppState>>,
+) -> Result<Json<Vec<ChatMessage>>, ApiErr> {
+    db::verify_token(&s.pool, token_from(&headers)).await
+        .map_err(|_| db_err())?.ok_or_else(unauth)?;
+    let rows = sqlx::query(&format!(
+        "{} WHERE board_id = ? AND pinned_at IS NOT NULL ORDER BY pinned_at DESC", SELECT
+    )).bind(&board_id).fetch_all(&s.pool).await.map_err(|_| db_err())?;
+    Ok(Json(rows.iter().map(row_to_msg).collect()))
+}
+
+/// PUT /api/messages/:id/pin — pins it (idempotent: re-pinning keeps the
+/// original pin time rather than bumping it to the top).
+pub async fn pin_message(
+    headers:  HeaderMap,
+    Path(id): Path<String>,
+    State(s): State<Arc<AppState>>,
+) -> Result<Json<serde_json::Value>, ApiErr> {
+    set_pinned(&s, &headers, &id, true).await
+}
+
+/// DELETE /api/messages/:id/pin — unpins it.
+pub async fn unpin_message(
+    headers:  HeaderMap,
+    Path(id): Path<String>,
+    State(s): State<Arc<AppState>>,
+) -> Result<Json<serde_json::Value>, ApiErr> {
+    set_pinned(&s, &headers, &id, false).await
+}
+
+async fn set_pinned(s: &AppState, headers: &HeaderMap, id: &str, pinned: bool) -> Result<Json<serde_json::Value>, ApiErr> {
+    let username = db::verify_token(&s.pool, token_from(headers)).await
+        .map_err(|_| db_err())?.ok_or_else(unauth)?;
+    let row = sqlx::query("SELECT board_id FROM messages WHERE id = ?")
+        .bind(id).fetch_optional(&s.pool).await.map_err(|_| db_err())?
+        .ok_or_else(not_found)?;
+    let board_id: String = row.get("board_id");
+
+    if pinned {
+        sqlx::query("UPDATE messages SET pinned_at = ?, pinned_by = ? WHERE id = ? AND pinned_at IS NULL")
+            .bind(chrono::Utc::now().to_rfc3339()).bind(&username).bind(id)
+            .execute(&s.pool).await.map_err(|_| db_err())?;
+    } else {
+        sqlx::query("UPDATE messages SET pinned_at = NULL, pinned_by = NULL WHERE id = ?")
+            .bind(id).execute(&s.pool).await.map_err(|_| db_err())?;
+    }
+
+    let _ = s.tx.send(serde_json::json!({
+        "type": "message_pin", "id": id, "board_id": board_id, "pinned": pinned, "by": username,
+    }).to_string());
+    Ok(Json(serde_json::json!({ "ok": true, "pinned": pinned })))
 }
