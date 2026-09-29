@@ -206,7 +206,11 @@ async fn handle_socket(socket: WebSocket, token: String, state: Arc<AppState>) {
                                     tracing::info!("voice: pfp_upload from {username}: {} base64 chars", data.len());
                                     if let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(&data) {
                                         tracing::info!("voice: pfp_upload from {username}: decoded to {} bytes", bytes.len());
-                                        if crate::pfp::save_cached(&username, &bytes, updated_at).is_ok() {
+                                        let saved = crate::pfp::save_cached(&username, &bytes, updated_at);
+                                        if let Err(e) = &saved {
+                                            tracing::warn!("voice: rejected pfp from {username}: {e}");
+                                        }
+                                        if saved.is_ok() {
                                             tracing::info!("voice: cached {} bytes for {username}", bytes.len());
                                             // Broadcast to everyone, not just a targeted
                                             // send — anyone currently displaying this

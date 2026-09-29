@@ -73,12 +73,41 @@ pub fn cached_timestamp(username: &str) -> Option<i64> {
     std::fs::read_to_string(ts_path).ok()?.trim().parse().ok()
 }
 
+/// Largest pfp the server will cache. The client caps its own at the same
+/// value; the cropper's real output (1024px max) is far smaller.
+pub const MAX_PFP_BYTES: usize = 8 << 20;
+
+/// Sniffs the image type from its magic bytes. The cache file keeps its
+/// historical .png name, but can hold a JPEG (and later GIF/WebP for
+/// animated pfps), so the served Content-Type has to come from the bytes.
+pub fn image_mime(bytes: &[u8]) -> Option<&'static str> {
+    if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+        Some("image/png")
+    } else if bytes.starts_with(&[0xFF, 0xD8, 0xFF]) {
+        Some("image/jpeg")
+    } else if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") {
+        Some("image/gif")
+    } else if bytes.len() >= 12 && &bytes[0..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
+        Some("image/webp")
+    } else {
+        None
+    }
+}
+
 /// Writes a new cached picture and its timestamp, overwriting whatever
 /// was cached for this user before.
 pub fn save_cached(username: &str, png_bytes: &[u8], updated_at: i64) -> std::io::Result<()> {
     let Some(username) = sanitize_username(username) else {
         return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "invalid username"));
     };
+    // Static PNG/JPEG only for now — GIF/WebP get sniffed above so serving
+    // them later is ready, but accepting them waits on animated-pfp work.
+    if !matches!(image_mime(png_bytes), Some("image/png") | Some("image/jpeg")) {
+        return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "not a PNG or JPEG image"));
+    }
+    if png_bytes.len() > MAX_PFP_BYTES {
+        return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "image too large"));
+    }
     let dir = pfps_dir();
     std::fs::write(dir.join(format!("{username}.png")), png_bytes)?;
     std::fs::write(dir.join(format!("{username}.ts")), updated_at.to_string())?;
@@ -107,7 +136,7 @@ pub async fn serve_pfp(
             tracing::info!("voice: serving {} bytes for {username}'s pfp", data.len());
             Response::builder()
                 .status(StatusCode::OK)
-                .header(header::CONTENT_TYPE, "image/png")
+                .header(header::CONTENT_TYPE, image_mime(&data).unwrap_or("application/octet-stream"))
                 .body(Body::from(data))
                 .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
         }
