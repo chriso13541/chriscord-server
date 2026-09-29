@@ -31,4 +31,10 @@ pub struct AppState {
     /// above (which is pure presence tracking) to avoid conflating "who's
     /// in the channel" with "what's their live media connection state".
     pub voice_runtime: crate::voice::VoiceRuntime,
+    /// link token (UUID v4) → (stored filename it unlocks, expiry). Issued
+    /// by GET /api/files/:filename/link to logged-in users; /api/files only
+    /// serves a file to a valid, unexpired token for that exact file (or to
+    /// a request carrying a session token). In memory on purpose: a server
+    /// restart just means clients ask for fresh links.
+    pub file_links: Mutex<HashMap<String, (String, Instant)>>,
 }

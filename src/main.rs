@@ -47,6 +47,7 @@ async fn main() {
         voice:      Mutex::new(HashMap::new()),
         voice_status: Mutex::new(HashMap::new()),
         voice_runtime: voice::VoiceRuntime::new().await,
+        file_links: Mutex::new(HashMap::new()),
     });
 
     println!();
@@ -81,6 +82,7 @@ async fn main() {
         .route("/api/upload", post(files::upload)
             .layer(DefaultBodyLimit::disable()))
         .route("/api/files/:filename",  get(files::serve_file))
+        .route("/api/files/:filename/link", get(files::file_link))
         .route("/api/pfp/:username",    get(pfp::serve_pfp))
         .route("/api/preview",          get(preview::get_preview))
         .route("/ws",                   get(ws::ws_handler))

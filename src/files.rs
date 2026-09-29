@@ -5,6 +5,7 @@ use axum::{
     response::{IntoResponse, Response},
     Json,
 };
+use std::time::{Duration, Instant};
 use tower_http::services::ServeFile;
 use serde::Serialize;
 use std::sync::Arc;
@@ -110,13 +111,73 @@ pub struct FileQuery {
     /// and the original only lives in the message's attachment record, so
     /// the client passes it along.
     name: Option<String>,
+    /// Short-lived link token from GET /api/files/:filename/link.
+    t: Option<String>,
+}
+
+/// How long a file link stays usable. Checked when each request STARTS,
+/// so a big download begun inside the window runs to completion.
+const LINK_TTL: Duration = Duration::from_secs(5 * 60);
+
+/// Strips anything path-like from a requested filename; None if nothing
+/// usable is left.
+fn safe_name(filename: &str) -> Option<&str> {
+    let safe = std::path::Path::new(filename).file_name()?.to_str()?;
+    if safe.is_empty() || safe.starts_with('.') { None } else { Some(safe) }
+}
+
+/// GET /api/files/:filename/link — for logged-in users only (session
+/// token header): mints a fresh UUID link token for this one file, valid
+/// for LINK_TTL, and returns the ready-to-use relative URL. The client asks
+/// for one of these before showing an attachment inline or handing a
+/// download off to the browser, so /api/files itself never has to accept
+/// unauthenticated, permanent URLs.
+pub async fn file_link(
+    headers:        HeaderMap,
+    Path(filename): Path<String>,
+    State(s):       State<Arc<AppState>>,
+) -> Result<Json<serde_json::Value>, ApiErr> {
+    db::verify_token(&s.pool, token_from(&headers))
+        .await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "DB error"))?
+        .ok_or_else(|| err(StatusCode::UNAUTHORIZED, "Unauthorized"))?;
+    let safe = safe_name(&filename).ok_or_else(|| err(StatusCode::NOT_FOUND, "Not found"))?;
+    if tokio::fs::metadata(format!("{}/{}", UPLOAD_DIR, safe)).await.is_err() {
+        return Err(err(StatusCode::NOT_FOUND, "Not found"));
+    }
+
+    let token = uuid::Uuid::new_v4().to_string();
+    let now = Instant::now();
+    {
+        let mut links = s.file_links.lock().unwrap();
+        links.retain(|_, (_, expires)| *expires > now); // prune as we go
+        links.insert(token.clone(), (safe.to_string(), now + LINK_TTL));
+    }
+    Ok(Json(serde_json::json!({
+        "url": format!("/api/files/{safe}?t={token}"),
+        "expires_in": LINK_TTL.as_secs(),
+    })))
+}
+
+/// A request may read a file if it carries a valid session token, or a
+/// link token that was issued for this exact file and hasn't expired.
+async fn may_read(s: &AppState, headers: &HeaderMap, link_token: Option<&str>, file: &str) -> bool {
+    if let Some(t) = link_token {
+        let links = s.file_links.lock().unwrap();
+        if let Some((for_file, expires)) = links.get(t) {
+            return for_file == file && *expires > Instant::now();
+        }
+        return false;
+    }
+    let session = token_from(headers);
+    !session.is_empty() && db::verify_token(&s.pool, session).await.ok().flatten().is_some()
 }
 
 /// Uploaded files never change once written (every upload gets a fresh
-/// UUID name), so they can be cached forever, CDN-style. This is what stops
-/// the webview from downloading the same image or video again every time
-/// the message list re-renders.
-const IMMUTABLE_CACHE: &str = "public, max-age=31536000, immutable";
+/// UUID name), so a response can be cached for as long as its link is
+/// valid. `private` keeps shared proxies from storing access-controlled
+/// files; within the link's lifetime, the webview reuses its cached copy
+/// instead of re-downloading on every re-render.
+const FILE_CACHE: &str = "private, max-age=300, immutable";
 
 /// GET /api/files/:filename[?download=1&name=...] — serves a stored file.
 ///
@@ -129,15 +190,16 @@ const IMMUTABLE_CACHE: &str = "public, max-age=31536000, immutable";
 pub async fn serve_file(
     Path(filename): Path<String>,
     Query(q): Query<FileQuery>,
+    State(s): State<Arc<AppState>>,
     req: Request,
 ) -> Response {
-    // Strip any path traversal attempts
-    let safe = std::path::Path::new(&filename)
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("");
-    if safe.is_empty() || safe.starts_with('.') {
+    let Some(safe) = safe_name(&filename) else {
         return (StatusCode::NOT_FOUND, "Not found").into_response();
+    };
+    // Same 403 whether the token is missing, expired, for another file, or
+    // the file doesn't exist at all — nothing here confirms a filename.
+    if !may_read(&s, req.headers(), q.t.as_deref(), safe).await {
+        return (StatusCode::FORBIDDEN, "Link expired or invalid").into_response();
     }
     let path = format!("{}/{}", UPLOAD_DIR, safe);
 
@@ -153,7 +215,7 @@ pub async fn serve_file(
     }
 
     let headers = res.headers_mut();
-    headers.insert(header::CACHE_CONTROL, HeaderValue::from_static(IMMUTABLE_CACHE));
+    headers.insert(header::CACHE_CONTROL, HeaderValue::from_static(FILE_CACHE));
     headers.insert(header::X_CONTENT_TYPE_OPTIONS, HeaderValue::from_static("nosniff"));
     if q.download.as_deref().is_some_and(|d| d == "1" || d == "true") {
         let name = q.name.as_deref().unwrap_or(safe);
