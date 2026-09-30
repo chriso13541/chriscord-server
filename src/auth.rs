@@ -12,8 +12,13 @@ const CHALLENGE_TTL: Duration = Duration::from_secs(60);
 
 #[derive(Serialize)]
 pub struct ServerInfoResp {
-    pub name:         String,
-    pub requires_key: bool,
+    pub name:              String,
+    pub requires_key:      bool,
+    pub description:       String,
+    /// Changes whenever the banner does (0 = no banner), so clients know
+    /// when to refetch /api/server/banner.
+    pub banner_updated_at: i64,
+    pub owner:             Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -58,6 +63,9 @@ pub async fn server_info(State(s): State<Arc<AppState>>) -> Json<ServerInfoResp>
     Json(ServerInfoResp {
         name,
         requires_key: sk.map(|k| !k.is_empty()).unwrap_or(false),
+        description: db::get_config(&s.pool, "server_description").await.unwrap_or(None).unwrap_or_default(),
+        banner_updated_at: crate::admin::banner_updated_at(&s.pool).await,
+        owner: crate::admin::owner_username(&s.pool).await,
     })
 }
 
@@ -146,6 +154,14 @@ pub async fn join(
 
     vk.verify(&nonce_bytes, &sig)
         .map_err(|_| err(StatusCode::UNAUTHORIZED, "Signature verification failed"))?;
+
+    // ── 4b. Banned keys can't join ───────────────────────────────────────────
+    let banned = sqlx::query("SELECT 1 FROM bans WHERE public_key = ?")
+        .bind(&body.public_key).fetch_optional(&s.pool).await
+        .map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "DB error"))?.is_some();
+    if banned {
+        return Err(err(StatusCode::FORBIDDEN, "You are banned from this server"));
+    }
 
     // ── 5. Register or verify the user record (TOFU) ──────────────────────────
     // TOFU: first time this public key is seen, register it with the claimed username.

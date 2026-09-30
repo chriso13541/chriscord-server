@@ -1,0 +1,19 @@
+Third-party notices
+
+chriscord-server's own code is licensed separately from the third-party
+assets below. Each asset keeps its own license; using them does not change
+the license of chriscord-server itself.
+
+Material Symbols (admin panel icons)
+------------------------------------
+
+- Source: https://github.com/google/material-design-icons (commit bd8cb85),
+  symbols/web/*/materialsymbolsoutlined/*_24px.svg
+- Copyright: Google LLC
+- License: Apache License 2.0 — full text in licenses/material-symbols-LICENSE.txt
+- Modifications: the SVG paths are combined into one <symbol> sprite at the
+  top of src/admin.html; the shapes themselves are unchanged.
+
+Icons used: add, block, check, close, content_copy, crown (filled),
+dashboard, delete, group, image, logout, palette, person_remove, tag,
+upload, visibility, visibility_off, volume_up.

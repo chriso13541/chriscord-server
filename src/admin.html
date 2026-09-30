@@ -6,251 +6,477 @@
 <title>Chriscord Admin</title>
 <style>
   :root {
-    --bg:      #0e1117;
-    --surface: #1a1d27;
-    --border:  #2e3248;
-    --accent:  #7289da;
-    --green:   #43b581;
-    --red:     #f04747;
-    --text:    #dcddde;
-    --muted:   #72767d;
+    --bg:#0e1117; --surface:#1a1d27; --surface2:#222634; --border:#2e3248;
+    --accent:#7289da; --green:#43b581; --yellow:#faa61a; --red:#f04747;
+    --text:#dcddde; --strong:#fff; --muted:#8a8f98;
   }
-  * { box-sizing: border-box; margin: 0; padding: 0; }
-  body { font-family: 'Segoe UI', system-ui, sans-serif; background: var(--bg); color: var(--text); padding: 24px; max-width: 900px; margin: 0 auto; }
-  h1 { color: var(--accent); font-size: 1.6rem; margin-bottom: 6px; }
-  h2 { font-size: 1.1rem; margin-bottom: 12px; color: var(--text); }
-  h3 { font-size: 0.95rem; margin: 12px 0 8px; color: var(--muted); text-transform: uppercase; letter-spacing: .05em; }
-  .card { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 20px; margin-bottom: 20px; }
-  label { display: block; font-size: 0.85rem; color: var(--muted); margin-bottom: 4px; margin-top: 10px; }
-  input[type=text], input[type=password], select {
-    width: 100%; padding: 8px 12px; border-radius: 6px;
-    border: 1px solid var(--border); background: var(--bg);
-    color: var(--text); font-size: 0.9rem;
-  }
-  input:focus { outline: 2px solid var(--accent); border-color: transparent; }
-  .row { display: flex; gap: 10px; align-items: flex-end; flex-wrap: wrap; }
-  .row input { flex: 1; min-width: 120px; }
-  button {
-    padding: 8px 16px; border-radius: 6px; border: none;
-    background: var(--accent); color: #fff; font-size: 0.9rem;
-    cursor: pointer; white-space: nowrap;
-  }
-  button:hover { filter: brightness(1.15); }
-  button.danger { background: var(--red); }
-  button.small  { padding: 4px 10px; font-size: 0.8rem; }
-  .key-box {
-    font-family: 'Courier New', monospace; background: var(--bg);
-    border: 1px solid var(--border); border-radius: 6px;
-    padding: 10px 14px; letter-spacing: 2px; font-size: 0.95rem;
-    display: flex; align-items: center; justify-content: space-between; gap: 8px;
-  }
-  .key-box span { word-break: break-all; }
-  .msg { margin-top: 8px; font-size: 0.85rem; min-height: 18px; }
-  .ok  { color: var(--green); }
-  .err { color: var(--red); }
-  .room-block { border: 1px solid var(--border); border-radius: 8px; padding: 14px; margin-bottom: 12px; }
-  .room-header { display: flex; justify-content: space-between; align-items: center; }
-  .room-name { font-weight: 600; font-size: 1rem; }
-  .badge { font-size: 0.75rem; color: var(--muted); margin-left: 6px; }
-  .boards-list { display: flex; flex-wrap: wrap; gap: 6px; margin: 10px 0; }
-  .board-chip {
-    background: var(--bg); border: 1px solid var(--border);
-    border-radius: 20px; padding: 3px 10px; font-size: 0.8rem;
-    display: flex; align-items: center; gap: 6px;
-  }
-  .board-chip button { padding: 0 4px; background: none; color: var(--red); font-size: 1rem; line-height: 1; }
-  .add-board-row { display: flex; gap: 6px; margin-top: 8px; }
-  .add-board-row input { flex: 1; }
-  hr { border: none; border-top: 1px solid var(--border); margin: 16px 0; }
+  * { box-sizing:border-box; margin:0; padding:0; }
+  body { font-family:'Segoe UI',system-ui,sans-serif; background:var(--bg); color:var(--text); font-size:.92rem; }
+  .ic { width:18px; height:18px; fill:currentColor; flex-shrink:0; vertical-align:-4px; }
+  button { font:inherit; border:none; border-radius:6px; padding:8px 14px; background:var(--accent); color:#fff; cursor:pointer; display:inline-flex; align-items:center; gap:6px; }
+  button:hover { filter:brightness(1.12); }
+  button:disabled { opacity:.5; cursor:default; filter:none; }
+  button.ghost { background:var(--surface2); color:var(--text); }
+  button.danger { background:var(--red); }
+  button.small { padding:5px 10px; font-size:.82rem; }
+  input[type=text], input[type=password], input[type=number], select, textarea {
+    width:100%; padding:9px 12px; border-radius:6px; border:1px solid var(--border);
+    background:var(--bg); color:var(--text); font:inherit; }
+  input:focus, select:focus, textarea:focus { outline:2px solid var(--accent); border-color:transparent; }
+  textarea { resize:vertical; min-height:80px; }
+  label.f { display:block; font-size:.72rem; font-weight:700; text-transform:uppercase; letter-spacing:.04em; color:var(--muted); margin:16px 0 6px; }
+  .hint { font-size:.8rem; color:var(--muted); margin-top:6px; line-height:1.45; }
+  .msg { font-size:.85rem; margin-left:10px; }
+  .msg.ok { color:var(--green); } .msg.err { color:var(--red); }
+  .row { display:flex; gap:10px; align-items:center; flex-wrap:wrap; }
+
+  /* login */
+  #login { min-height:100vh; display:flex; align-items:center; justify-content:center; padding:20px; }
+  #login .box { width:100%; max-width:420px; background:var(--surface); border:1px solid var(--border); border-radius:12px; padding:28px; }
+  #login h1 { color:var(--accent); font-size:1.5rem; margin-bottom:6px; letter-spacing:.08em; }
+
+  /* layout */
+  #app { display:none; min-height:100vh; }
+  #app.on { display:flex; }
+  nav { width:230px; flex-shrink:0; background:var(--surface); border-right:1px solid var(--border); padding:18px 10px; display:flex; flex-direction:column; gap:2px; position:sticky; top:0; height:100vh; }
+  nav .brand { font-weight:800; color:var(--accent); letter-spacing:.08em; padding:4px 10px 4px; }
+  nav .srv { font-size:.8rem; color:var(--muted); padding:0 10px 14px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  nav a { display:flex; align-items:center; gap:10px; padding:9px 10px; border-radius:6px; color:var(--text); text-decoration:none; cursor:pointer; }
+  nav a:hover { background:var(--surface2); }
+  nav a.on { background:var(--surface2); color:var(--strong); }
+  nav .spacer { flex:1; }
+  main { flex:1; padding:34px 40px 60px; max-width:900px; }
+  main h2 { font-size:1.35rem; color:var(--strong); margin-bottom:4px; }
+  main .sub { color:var(--muted); margin-bottom:22px; }
+  section { display:none; } section.on { display:block; }
+  .card { background:var(--surface); border:1px solid var(--border); border-radius:10px; padding:20px; margin-bottom:18px; }
+  .card h3 { font-size:1rem; color:var(--strong); margin-bottom:2px; }
+  .stats { display:grid; grid-template-columns:repeat(auto-fill,minmax(150px,1fr)); gap:12px; margin-bottom:18px; }
+  .stat { background:var(--surface); border:1px solid var(--border); border-radius:10px; padding:14px 16px; }
+  .stat b { display:block; font-size:1.5rem; color:var(--strong); }
+  .stat span { font-size:.78rem; color:var(--muted); text-transform:uppercase; letter-spacing:.04em; }
+  .key-box { font-family:Consolas,'Courier New',monospace; background:var(--bg); border:1px solid var(--border); border-radius:6px; padding:9px 12px; display:flex; align-items:center; gap:8px; }
+  .key-box span { flex:1; word-break:break-all; }
+
+  /* banner preview: the client's sidebar is ~330px wide */
+  .banner-preview { width:330px; max-width:100%; height:150px; border-radius:8px; background:var(--surface2) center/cover no-repeat; border:1px solid var(--border); position:relative; overflow:hidden; }
+  .banner-preview .bp-name { position:absolute; left:12px; top:10px; right:12px; font-weight:700; color:#fff; text-shadow:0 1px 4px rgba(0,0,0,.8); }
+  .banner-preview.none { display:flex; align-items:center; justify-content:center; color:var(--muted); font-size:.85rem; }
+  .banner-preview.none .bp-name { display:none; }
+
+  /* channels */
+  .room { border:1px solid var(--border); border-radius:8px; padding:14px; margin-bottom:12px; }
+  .room-head { display:flex; justify-content:space-between; align-items:center; gap:10px; }
+  .room-name { font-weight:700; color:var(--strong); display:flex; align-items:center; gap:6px; }
+  .tagp { font-size:.72rem; color:var(--muted); background:var(--surface2); border-radius:10px; padding:1px 8px; margin-left:6px; }
+  .boards { display:flex; flex-wrap:wrap; gap:6px; margin:10px 0; }
+  .chip { background:var(--bg); border:1px solid var(--border); border-radius:14px; padding:3px 4px 3px 10px; font-size:.84rem; display:flex; align-items:center; gap:4px; }
+  .chip button { padding:2px; background:none; color:var(--muted); }
+  .chip button:hover { color:var(--red); }
+
+  /* members */
+  table { width:100%; border-collapse:collapse; }
+  th { text-align:left; font-size:.72rem; text-transform:uppercase; letter-spacing:.04em; color:var(--muted); padding:8px 10px; border-bottom:1px solid var(--border); }
+  td { padding:10px; border-bottom:1px solid var(--border); vertical-align:middle; }
+  tr:last-child td { border-bottom:none; }
+  .who { display:flex; align-items:center; gap:10px; }
+  .av { width:32px; height:32px; border-radius:50%; display:flex; align-items:center; justify-content:center; font-weight:700; color:#fff; flex-shrink:0; }
+  .name { color:var(--strong); font-weight:600; display:flex; align-items:center; gap:6px; }
+  .crown { color:var(--yellow); }
+  .fp { font-family:Consolas,monospace; font-size:.75rem; color:var(--muted); }
+  .dot { display:inline-block; width:8px; height:8px; border-radius:50%; margin-right:6px; background:var(--muted); }
+  .dot.online { background:var(--green); } .dot.idle { background:var(--yellow); }
+  .acts { display:flex; gap:6px; justify-content:flex-end; flex-wrap:wrap; }
+  .empty { color:var(--muted); padding:18px 4px; }
+
+  /* modal */
+  #modal { position:fixed; inset:0; background:rgba(0,0,0,.6); display:none; align-items:center; justify-content:center; padding:20px; z-index:10; }
+  #modal.on { display:flex; }
+  #modal .box { background:var(--surface); border:1px solid var(--border); border-radius:10px; padding:22px; width:100%; max-width:440px; }
+  #modal h3 { color:var(--strong); margin-bottom:6px; }
+  #modal .row { justify-content:flex-end; margin-top:18px; }
+  #toast { position:fixed; bottom:20px; left:50%; transform:translateX(-50%); background:var(--surface2); border:1px solid var(--border); padding:10px 16px; border-radius:8px; display:none; z-index:20; }
+  #toast.on { display:block; } #toast.err { border-color:var(--red); }
+  @media (max-width:760px){ #app.on{flex-direction:column} nav{width:auto;height:auto;position:static;flex-direction:row;flex-wrap:wrap} nav .spacer,nav .srv{display:none} main{padding:22px 16px} }
 </style>
 </head>
 <body>
+<!-- Icons: Google Material Symbols, Apache 2.0 — see THIRD_PARTY_NOTICES.txt -->
+<svg xmlns="http://www.w3.org/2000/svg" style="display:none">
+<symbol id="i-dashboard" viewBox="0 -960 960 960"><path d="M520-600v-240h320v240H520ZM120-440v-400h320v400H120Zm400 320v-400h320v400H520Zm-400 0v-240h320v240H120Zm80-400h160v-240H200v240Zm400 320h160v-240H600v240Zm0-480h160v-80H600v80ZM200-200h160v-80H200v80Zm160-320Zm240-160Zm0 240ZM360-280Z"/></symbol>
+<symbol id="i-palette" viewBox="0 -960 960 960"><path d="M480-80q-82 0-155-31.5t-127.5-86Q143-252 111.5-325T80-480q0-83 32.5-156t88-127Q256-817 330-848.5T488-880q80 0 151 27.5t124.5 76q53.5 48.5 85 115T880-518q0 115-70 176.5T640-280h-74q-9 0-12.5 5t-3.5 11q0 12 15 34.5t15 51.5q0 50-27.5 74T480-80Zm0-400Zm-220 40q26 0 43-17t17-43q0-26-17-43t-43-17q-26 0-43 17t-17 43q0 26 17 43t43 17Zm120-160q26 0 43-17t17-43q0-26-17-43t-43-17q-26 0-43 17t-17 43q0 26 17 43t43 17Zm200 0q26 0 43-17t17-43q0-26-17-43t-43-17q-26 0-43 17t-17 43q0 26 17 43t43 17Zm120 160q26 0 43-17t17-43q0-26-17-43t-43-17q-26 0-43 17t-17 43q0 26 17 43t43 17ZM480-160q9 0 14.5-5t5.5-13q0-14-15-33t-15-57q0-42 29-67t71-25h70q66 0 113-38.5T800-518q0-121-92.5-201.5T488-800q-136 0-232 93t-96 227q0 133 93.5 226.5T480-160Z"/></symbol>
+<symbol id="i-upload" viewBox="0 -960 960 960"><path d="M440-320v-326L336-542l-56-58 200-200 200 200-56 58-104-104v326h-80ZM240-160q-33 0-56.5-23.5T160-240v-120h80v120h480v-120h80v120q0 33-23.5 56.5T720-160H240Z"/></symbol>
+<symbol id="i-tag" viewBox="0 -960 960 960"><path d="m240-160 40-160H120l20-80h160l40-160H180l20-80h160l40-160h80l-40 160h160l40-160h80l-40 160h160l-20 80H660l-40 160h160l-20 80H600l-40 160h-80l40-160H360l-40 160h-80Zm140-240h160l40-160H420l-40 160Z"/></symbol>
+<symbol id="i-group" viewBox="0 -960 960 960"><path d="M40-160v-112q0-34 17.5-62.5T104-378q62-31 126-46.5T360-440q66 0 130 15.5T616-378q29 15 46.5 43.5T680-272v112H40Zm720 0v-120q0-44-24.5-84.5T666-434q51 6 96 20.5t84 35.5q36 20 55 44.5t19 53.5v120H760ZM360-480q-66 0-113-47t-47-113q0-66 47-113t113-47q66 0 113 47t47 113q0 66-47 113t-113 47Zm400-160q0 66-47 113t-113 47q-11 0-28-2.5t-28-5.5q27-32 41.5-71t14.5-81q0-42-14.5-81T544-792q14-5 28-6.5t28-1.5q66 0 113 47t47 113ZM120-240h480v-32q0-11-5.5-20T580-306q-54-27-109-40.5T360-360q-56 0-111 13.5T140-306q-9 5-14.5 14t-5.5 20v32Zm240-320q33 0 56.5-23.5T440-640q0-33-23.5-56.5T360-720q-33 0-56.5 23.5T280-640q0 33 23.5 56.5T360-560Zm0 320Zm0-400Z"/></symbol>
+<symbol id="i-block" viewBox="0 -960 960 960"><path d="M480-80q-83 0-156-31.5T197-197q-54-54-85.5-127T80-480q0-83 31.5-156T197-763q54-54 127-85.5T480-880q83 0 156 31.5T763-763q54 54 85.5 127T880-480q0 83-31.5 156T763-197q-54 54-127 85.5T480-80Zm0-80q54 0 104-17.5t92-50.5L228-676q-33 42-50.5 92T160-480q0 134 93 227t227 93Zm252-124q33-42 50.5-92T800-480q0-134-93-227t-227-93q-54 0-104 17.5T284-732l448 448Z"/></symbol>
+<symbol id="i-logout" viewBox="0 -960 960 960"><path d="M200-120q-33 0-56.5-23.5T120-200v-560q0-33 23.5-56.5T200-840h280v80H200v560h280v80H200Zm440-160-55-58 102-102H360v-80h327L585-622l55-58 200 200-200 200Z"/></symbol>
+<symbol id="i-delete" viewBox="0 -960 960 960"><path d="M280-120q-33 0-56.5-23.5T200-200v-520h-40v-80h200v-40h240v40h200v80h-40v520q0 33-23.5 56.5T680-120H280Zm400-600H280v520h400v-520ZM360-280h80v-360h-80v360Zm160 0h80v-360h-80v360ZM280-720v520-520Z"/></symbol>
+<symbol id="i-add" viewBox="0 -960 960 960"><path d="M440-440H200v-80h240v-240h80v240h240v80H520v240h-80v-240Z"/></symbol>
+<symbol id="i-content_copy" viewBox="0 -960 960 960"><path d="M360-240q-33 0-56.5-23.5T280-320v-480q0-33 23.5-56.5T360-880h360q33 0 56.5 23.5T800-800v480q0 33-23.5 56.5T720-240H360Zm0-80h360v-480H360v480ZM200-80q-33 0-56.5-23.5T120-160v-560h80v560h440v80H200Zm160-240v-480 480Z"/></symbol>
+<symbol id="i-person_remove" viewBox="0 -960 960 960"><path d="M640-520v-80h240v80H640Zm-280 40q-66 0-113-47t-47-113q0-66 47-113t113-47q66 0 113 47t47 113q0 66-47 113t-113 47ZM40-160v-112q0-34 17.5-62.5T104-378q62-31 126-46.5T360-440q66 0 130 15.5T616-378q29 15 46.5 43.5T680-272v112H40Zm80-80h480v-32q0-11-5.5-20T580-306q-54-27-109-40.5T360-360q-56 0-111 13.5T140-306q-9 5-14.5 14t-5.5 20v32Zm240-320q33 0 56.5-23.5T440-640q0-33-23.5-56.5T360-720q-33 0-56.5 23.5T280-640q0 33 23.5 56.5T360-560Zm0-80Zm0 400Z"/></symbol>
+<symbol id="i-volume_up" viewBox="0 -960 960 960"><path d="M560-131v-82q90-26 145-100t55-168q0-94-55-168T560-749v-82q124 28 202 125.5T840-481q0 127-78 224.5T560-131ZM120-360v-240h160l200-200v640L280-360H120Zm440 40v-322q47 22 73.5 66t26.5 96q0 51-26.5 94.5T560-320ZM400-606l-86 86H200v80h114l86 86v-252ZM300-480Z"/></symbol>
+<symbol id="i-visibility" viewBox="0 -960 960 960"><path d="M480-320q75 0 127.5-52.5T660-500q0-75-52.5-127.5T480-680q-75 0-127.5 52.5T300-500q0 75 52.5 127.5T480-320Zm0-72q-45 0-76.5-31.5T372-500q0-45 31.5-76.5T480-608q45 0 76.5 31.5T588-500q0 45-31.5 76.5T480-392Zm0 192q-146 0-266-81.5T40-500q54-137 174-218.5T480-800q146 0 266 81.5T920-500q-54 137-174 218.5T480-200Zm0-300Zm0 220q113 0 207.5-59.5T832-500q-50-101-144.5-160.5T480-720q-113 0-207.5 59.5T128-500q50 101 144.5 160.5T480-280Z"/></symbol>
+<symbol id="i-visibility_off" viewBox="0 -960 960 960"><path d="m644-428-58-58q9-47-27-88t-93-32l-58-58q17-8 34.5-12t37.5-4q75 0 127.5 52.5T660-500q0 20-4 37.5T644-428Zm128 126-58-56q38-29 67.5-63.5T832-500q-50-101-143.5-160.5T480-720q-29 0-57 4t-55 12l-62-62q41-17 84-25.5t90-8.5q151 0 269 83.5T920-500q-23 59-60.5 109.5T772-302Zm20 246L624-222q-35 11-70.5 16.5T480-200q-151 0-269-83.5T40-500q21-53 53-98.5t73-81.5L56-792l56-56 736 736-56 56ZM222-624q-29 26-53 57t-41 67q50 101 143.5 160.5T480-280q20 0 39-2.5t39-5.5l-36-38q-11 3-21 4.5t-21 1.5q-75 0-127.5-52.5T300-500q0-11 1.5-21t4.5-21l-84-82Zm319 93Zm-151 75Z"/></symbol>
+<symbol id="i-image" viewBox="0 -960 960 960"><path d="M200-120q-33 0-56.5-23.5T120-200v-560q0-33 23.5-56.5T200-840h560q33 0 56.5 23.5T840-760v560q0 33-23.5 56.5T760-120H200Zm0-80h560v-560H200v560Zm40-80h480L570-480 450-320l-90-120-120 160Zm-40 80v-560 560Z"/></symbol>
+<symbol id="i-close" viewBox="0 -960 960 960"><path d="m256-200-56-56 224-224-224-224 56-56 224 224 224-224 56 56-224 224 224 224-56 56-224-224-224 224Z"/></symbol>
+<symbol id="i-check" viewBox="0 -960 960 960"><path d="M382-240 154-468l57-57 171 171 367-367 57 57-424 424Z"/></symbol>
+<symbol id="i-crown" viewBox="0 -960 960 960"><path d="M200-160v-80h560v80H200Zm0-140-51-321q-2 0-4.5.5t-4.5.5q-25 0-42.5-17.5T80-680q0-25 17.5-42.5T140-740q25 0 42.5 17.5T200-680q0 7-1.5 13t-3.5 11l125 56 125-171q-11-8-18-21t-7-28q0-25 17.5-42.5T480-880q25 0 42.5 17.5T540-820q0 15-7 28t-18 21l125 171 125-56q-2-5-3.5-11t-1.5-13q0-25 17.5-42.5T820-740q25 0 42.5 17.5T880-680q0 25-17.5 42.5T820-620q-2 0-4.5-.5t-4.5-.5l-51 321H200Z"/></symbol>
+</svg>
 
-<h1>🎮 Chriscord Admin</h1>
-<p style="color:var(--muted);margin-bottom:20px;font-size:.9rem">Server management panel — keep your owner key secret.</p>
-
-<!-- Keys -->
-<div class="card">
-  <h2>Server Keys</h2>
-  <label>Owner Key (admin access — never share this)</label>
-  <div class="key-box"><span id="owner-key">loading…</span><button class="small" onclick="copy('owner-key')">Copy</button></div>
-  <label>Join Key (give this to friends — blank = open server)</label>
-  <div class="key-box"><span id="join-key">loading…</span><button class="small" onclick="copy('join-key')">Copy</button></div>
-</div>
-
-<!-- Settings -->
-<div class="card">
-  <h2>Server Settings</h2>
-  <label>Server Name</label>
-  <input type="text" id="cfg-name" placeholder="My Chriscord Server">
-  <label>Join Key (leave blank for open server)</label>
-  <input type="text" id="cfg-joinkey" placeholder="e.g. abc123 or leave blank">
-  <label>Owner Key (required to save)</label>
-  <input type="password" id="cfg-ownerkey" placeholder="Paste your owner key">
-  <div style="margin-top:12px"><button onclick="saveSettings()">Save Settings</button></div>
-  <div class="msg" id="settings-msg"></div>
-</div>
-
-<!-- Rooms & Boards -->
-<div class="card">
-  <h2>Rooms &amp; Boards</h2>
-  <div id="rooms-list"><em style="color:var(--muted)">Loading…</em></div>
-  <hr>
-  <h3>Create New Room</h3>
-  <div class="row">
-    <input type="text" id="new-room-name" placeholder="Room name (e.g. Hangout)">
-    <select id="new-room-type">
-      <option value="text">Text</option>
-      <option value="voice">Voice</option>
-    </select>
-    <label style="margin:0;display:flex;align-items:center;gap:6px;white-space:nowrap">
-      <input type="checkbox" id="new-room-private"> Private
-    </label>
-    <input type="password" id="new-room-key" placeholder="Owner key">
-    <button onclick="createRoom()">Create Room</button>
+<!-- ── Sign in ─────────────────────────────────────────────────────── -->
+<div id="login">
+  <div class="box">
+    <h1>CHRISCORD ADMIN</h1>
+    <p class="hint" style="margin-bottom:6px">Enter the owner key printed in the server's console when it starts
+      (<code>Owner key : …</code>). It's the only thing that grants admin access — never share it.</p>
+    <label class="f" for="login-key">Owner key</label>
+    <input type="password" id="login-key" autocomplete="current-password" spellcheck="false">
+    <label class="row" style="margin-top:10px;font-size:.85rem;color:var(--muted);gap:8px;cursor:pointer">
+      <input type="checkbox" id="login-remember"> Remember on this browser</label>
+    <div class="row" style="margin-top:18px"><button id="login-btn">Sign in</button><span class="msg" id="login-msg"></span></div>
   </div>
-  <div class="msg" id="room-msg"></div>
 </div>
+
+<!-- ── Panel ───────────────────────────────────────────────────────── -->
+<div id="app">
+  <nav>
+    <div class="brand">CHRISCORD</div>
+    <div class="srv" id="nav-server-name">Server</div>
+    <a data-sec="overview" class="on"><svg class="ic"><use href="#i-dashboard"/></svg>Overview</a>
+    <a data-sec="custom"><svg class="ic"><use href="#i-palette"/></svg>Customization</a>
+    <a data-sec="uploads"><svg class="ic"><use href="#i-upload"/></svg>Uploads</a>
+    <a data-sec="channels"><svg class="ic"><use href="#i-tag"/></svg>Channels</a>
+    <a data-sec="members"><svg class="ic"><use href="#i-group"/></svg>Members</a>
+    <a data-sec="bans"><svg class="ic"><use href="#i-block"/></svg>Bans</a>
+    <div class="spacer"></div>
+    <a id="signout"><svg class="ic"><use href="#i-logout"/></svg>Sign out</a>
+  </nav>
+  <main>
+    <!-- Overview -->
+    <section id="sec-overview" class="on">
+      <h2>Overview</h2><p class="sub">Your server at a glance, and who can join it.</p>
+      <div class="stats">
+        <div class="stat"><b id="st-members">–</b><span>Members</span></div>
+        <div class="stat"><b id="st-online">–</b><span>Online now</span></div>
+        <div class="stat"><b id="st-channels">–</b><span>Channels</span></div>
+        <div class="stat"><b id="st-upload">–</b><span>Upload limit</span></div>
+      </div>
+      <div class="card">
+        <h3>Join key</h3>
+        <p class="hint">Friends need this to join. Leave it blank to let anyone who can reach the server join.</p>
+        <label class="f" for="cfg-joinkey">Join key</label>
+        <div class="row"><input type="text" id="cfg-joinkey" style="flex:1" placeholder="(blank — open server)" spellcheck="false">
+          <button class="ghost" id="joinkey-copy" title="Copy"><svg class="ic"><use href="#i-content_copy"/></svg></button>
+          <button class="ghost" id="joinkey-gen">Generate</button>
+          <button id="joinkey-save">Save</button><span class="msg" id="joinkey-msg"></span></div>
+      </div>
+    </section>
+
+    <!-- Customization -->
+    <section id="sec-custom">
+      <h2>Customization</h2><p class="sub">How the server looks to members — changes show up in everyone's app right away.</p>
+      <div class="card">
+        <label class="f" for="cfg-name" style="margin-top:0">Server name</label>
+        <input type="text" id="cfg-name" maxlength="64">
+        <label class="f" for="cfg-desc">Description</label>
+        <textarea id="cfg-desc" maxlength="300" placeholder="What's this server about?"></textarea>
+        <div class="hint" id="desc-count" style="text-align:right">0 / 300</div>
+        <div class="row" style="margin-top:12px"><button id="custom-save">Save</button><span class="msg" id="custom-msg"></span></div>
+      </div>
+      <div class="card">
+        <h3>Server banner</h3>
+        <p class="hint">Shown at the top of the channel list, like Discord's server banner. PNG or JPEG up to 8 MB;
+          it's cropped to fill, so a wide image around 960×440 works best.</p>
+        <div style="margin-top:14px" class="banner-preview none" id="banner-preview"><span class="bp-name" id="bp-name"></span><span id="bp-empty">No banner</span></div>
+        <div class="row" style="margin-top:12px">
+          <input type="file" id="banner-file" accept="image/png,image/jpeg" hidden>
+          <button id="banner-choose"><svg class="ic"><use href="#i-image"/></svg>Upload banner</button>
+          <button class="ghost" id="banner-remove">Remove</button><span class="msg" id="banner-msg"></span></div>
+      </div>
+    </section>
+
+    <!-- Uploads -->
+    <section id="sec-uploads">
+      <h2>Uploads</h2><p class="sub">Limits for files members attach to messages.</p>
+      <div class="card">
+        <label class="f" for="cfg-maxup" style="margin-top:0">Maximum file size (MB)</label>
+        <div class="row"><input type="number" id="cfg-maxup" min="1" max="4096" style="width:140px">
+          <button class="ghost small" data-mb="25">25 MB</button><button class="ghost small" data-mb="100">100 MB</button>
+          <button class="ghost small" data-mb="500">500 MB</button><button class="ghost small" data-mb="2048">2 GB</button></div>
+        <p class="hint">Applies to each file. Bigger uploads are rejected with a message telling the member the limit.
+          Keep an eye on free disk space on the server — uploads are stored in <code>./uploads</code>.</p>
+        <div class="row" style="margin-top:12px"><button id="uploads-save">Save</button><span class="msg" id="uploads-msg"></span></div>
+      </div>
+    </section>
+
+    <!-- Channels -->
+    <section id="sec-channels">
+      <h2>Channels</h2><p class="sub">Categories (rooms) and the channels inside them.</p>
+      <div id="rooms"></div>
+      <div class="card">
+        <h3>New category</h3>
+        <div class="row" style="margin-top:12px">
+          <input type="text" id="new-room-name" placeholder="Name (e.g. Hangout)" style="flex:1;min-width:180px">
+          <select id="new-room-type" style="width:120px"><option value="text">Text</option><option value="voice">Voice</option></select>
+          <label class="row" style="gap:6px;color:var(--muted)"><input type="checkbox" id="new-room-private"> Private</label>
+          <button id="room-create"><svg class="ic"><use href="#i-add"/></svg>Create</button><span class="msg" id="room-msg"></span>
+        </div>
+      </div>
+    </section>
+
+    <!-- Members -->
+    <section id="sec-members">
+      <h2>Members</h2><p class="sub">Everyone who has joined. The crown marks the server owner in everyone's member list.</p>
+      <div class="card" style="padding:8px 12px">
+        <table><thead><tr><th>Member</th><th>Status</th><th>Joined</th><th style="text-align:right">Actions</th></tr></thead>
+          <tbody id="members"></tbody></table>
+      </div>
+      <p class="hint"><b>Kick</b> signs them out and removes them from the member list — like Discord, they can come back by
+        joining again (with the join key, if you've set one). <b>Ban</b> does the same and blocks their account from ever joining again.</p>
+    </section>
+
+    <!-- Bans -->
+    <section id="sec-bans">
+      <h2>Bans</h2><p class="sub">Accounts that can't join. Unbanning lets them join again.</p>
+      <div class="card" style="padding:8px 12px">
+        <table><thead><tr><th>Member</th><th>Reason</th><th>Banned</th><th style="text-align:right"></th></tr></thead>
+          <tbody id="bans"></tbody></table>
+      </div>
+    </section>
+  </main>
+</div>
+
+<div id="modal"><div class="box" id="modal-box"></div></div>
+<div id="toast"></div>
 
 <script>
-let serverData = {};
+// ── API ──────────────────────────────────────────────────────────────
+// The owner key is kept for this browser tab only (or in localStorage if
+// "Remember" was ticked) and sent as X-Owner-Key on every admin request.
+let KEY = sessionStorage.getItem('ownerKey') || localStorage.getItem('ownerKey') || '';
+async function api(path, opts = {}) {
+  const headers = { 'X-Owner-Key': KEY, ...(opts.headers || {}) };
+  if (opts.json !== undefined) { headers['Content-Type'] = 'application/json'; opts.body = JSON.stringify(opts.json); }
+  const res = await fetch(path, { method: opts.method || (opts.body ? 'POST' : 'GET'), headers, body: opts.body });
+  if (res.status === 401 && !opts.noLogout) { signOut('Your owner key was rejected — sign in again.'); throw new Error('Unauthorized'); }
+  let data = null; try { data = await res.json(); } catch {}
+  if (!res.ok) throw new Error(data?.error || ('HTTP ' + res.status));
+  return data;
+}
+const $ = id => document.getElementById(id);
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const icon = n => `<svg class="ic"><use href="#i-${n}"/></svg>`;
+function flash(id, text, ok = true) { const m = $(id); m.className = 'msg ' + (ok ? 'ok' : 'err'); m.textContent = text; if (ok) setTimeout(() => { if (m.textContent === text) m.textContent = ''; }, 2500); }
+function toast(text, err = false) { const t = $('toast'); t.textContent = text; t.className = 'on' + (err ? ' err' : ''); clearTimeout(t._h); t._h = setTimeout(() => t.className = '', 3000); }
+function colour(name) { let h = 0; for (const c of name) h = (h * 31 + c.charCodeAt(0)) >>> 0; return `hsl(${h % 360} 45% 45%)`; }
+function fmtDate(iso) { try { return new Date(iso).toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' }); } catch { return ''; } }
 
+// ── Sign in / out ────────────────────────────────────────────────────
+async function signIn(key, remember) {
+  KEY = key.trim();
+  try { await api('/api/admin/info', { noLogout: true }); }
+  catch (e) { KEY = ''; flash('login-msg', 'That key isn\u2019t right.', false); return; }
+  (remember ? localStorage : sessionStorage).setItem('ownerKey', KEY);
+  $('login').style.display = 'none'; $('app').classList.add('on');
+  loadAll();
+}
+function signOut(msg) {
+  KEY = ''; sessionStorage.removeItem('ownerKey'); localStorage.removeItem('ownerKey');
+  $('app').classList.remove('on'); $('login').style.display = '';
+  if (msg) flash('login-msg', msg, false);
+}
+$('login-btn').onclick = () => signIn($('login-key').value, $('login-remember').checked);
+$('login-key').onkeydown = e => { if (e.key === 'Enter') $('login-btn').click(); };
+$('signout').onclick = () => signOut();
+
+// ── Navigation ───────────────────────────────────────────────────────
+document.querySelectorAll('nav a[data-sec]').forEach(a => a.onclick = () => {
+  document.querySelectorAll('nav a[data-sec]').forEach(x => x.classList.toggle('on', x === a));
+  document.querySelectorAll('main section').forEach(s => s.classList.toggle('on', s.id === 'sec-' + a.dataset.sec));
+  if (a.dataset.sec === 'members') loadMembers();
+  if (a.dataset.sec === 'bans') loadBans();
+});
+
+// ── Load ─────────────────────────────────────────────────────────────
+let info = {};
 async function loadAll() {
-  const infoRes = await fetch('/api/admin/info');
-  if (!infoRes.ok) { document.getElementById('rooms-list').textContent = 'Failed to load admin info.'; return; }
-  const d = await infoRes.json();
-  serverData = d;
-  document.getElementById('owner-key').textContent = d.owner_key;
-  document.getElementById('join-key').textContent  = d.server_key || '(none — open server)';
-  document.getElementById('cfg-name').value        = d.server_name;
-  document.getElementById('cfg-joinkey').value     = d.server_key || '';
-
-  // Use owner-key-authenticated endpoint so we don't need a session token
-  const roomsRes = await fetch('/api/admin/rooms', {
-    headers: { 'X-Owner-Key': d.owner_key }
-  });
-  if (roomsRes.ok) renderRooms(await roomsRes.json());
+  await loadInfo();
+  await Promise.all([loadRooms(), loadMembers(), loadBans()]);
+}
+async function loadInfo() {
+  info = await api('/api/admin/info');
+  $('nav-server-name').textContent = info.server_name;
+  $('cfg-joinkey').value = info.server_key || '';
+  $('cfg-name').value = info.server_name;
+  $('cfg-desc').value = info.description || ''; updateDescCount();
+  $('cfg-maxup').value = info.max_upload_mb;
+  $('st-upload').textContent = info.max_upload_mb >= 1024 ? (info.max_upload_mb / 1024).toFixed(info.max_upload_mb % 1024 ? 1 : 0) + ' GB' : info.max_upload_mb + ' MB';
+  $('bp-name').textContent = info.server_name;
+  await showBanner();
+}
+async function showBanner() {
+  const p = $('banner-preview');
+  if (!info.banner_updated_at) { p.classList.add('none'); p.style.backgroundImage = ''; $('bp-empty').style.display = ''; return; }
+  const res = await fetch('/api/server/banner', { headers: { 'X-Owner-Key': KEY } });
+  if (!res.ok) { p.classList.add('none'); return; }
+  const url = URL.createObjectURL(await res.blob());
+  p.classList.remove('none'); p.style.backgroundImage = `linear-gradient(rgba(0,0,0,.35),transparent 45%),url("${url}")`; $('bp-empty').style.display = 'none';
 }
 
-async function renderRooms(rooms) {
-  const el = document.getElementById('rooms-list');
-  if (!rooms.length) { el.innerHTML = '<em style="color:var(--muted)">No rooms yet — create one below.</em>'; return; }
+// ── Overview: join key ───────────────────────────────────────────────
+$('joinkey-save').onclick = async () => {
+  try { await api('/api/admin/settings', { json: { server_key: $('cfg-joinkey').value } }); flash('joinkey-msg', 'Saved'); }
+  catch (e) { flash('joinkey-msg', e.message, false); }
+};
+$('joinkey-gen').onclick = () => { const a = new Uint8Array(6); crypto.getRandomValues(a); $('cfg-joinkey').value = [...a].map(b => b.toString(16).padStart(2, '0')).join(''); };
+$('joinkey-copy').onclick = () => navigator.clipboard.writeText($('cfg-joinkey').value).then(() => toast('Join key copied'));
 
-  el.innerHTML = '';
+// ── Customization ────────────────────────────────────────────────────
+function updateDescCount() { $('desc-count').textContent = `${[...$('cfg-desc').value].length} / 300`; }
+$('cfg-desc').oninput = updateDescCount;
+$('cfg-name').oninput = () => $('bp-name').textContent = $('cfg-name').value;
+$('custom-save').onclick = async () => {
+  const name = $('cfg-name').value.trim();
+  if (!name) return flash('custom-msg', 'The server needs a name', false);
+  try { await api('/api/admin/settings', { json: { server_name: name, description: $('cfg-desc').value } }); flash('custom-msg', 'Saved'); $('nav-server-name').textContent = name; }
+  catch (e) { flash('custom-msg', e.message, false); }
+};
+$('banner-choose').onclick = () => $('banner-file').click();
+$('banner-file').onchange = async () => {
+  const f = $('banner-file').files[0]; $('banner-file').value = '';
+  if (!f) return;
+  if (f.size > 8 * 1024 * 1024) return flash('banner-msg', 'That image is over 8 MB', false);
+  try {
+    const r = await api('/api/admin/banner', { method: 'POST', body: f, headers: { 'Content-Type': f.type } });
+    info.banner_updated_at = r.banner_updated_at; await showBanner(); flash('banner-msg', 'Banner updated');
+  } catch (e) { flash('banner-msg', e.message, false); }
+};
+$('banner-remove').onclick = async () => {
+  try { await api('/api/admin/banner', { method: 'DELETE' }); info.banner_updated_at = 0; await showBanner(); flash('banner-msg', 'Banner removed'); }
+  catch (e) { flash('banner-msg', e.message, false); }
+};
+
+// ── Uploads ──────────────────────────────────────────────────────────
+document.querySelectorAll('[data-mb]').forEach(b => b.onclick = () => $('cfg-maxup').value = b.dataset.mb);
+$('uploads-save').onclick = async () => {
+  const mb = parseInt($('cfg-maxup').value, 10);
+  if (!(mb >= 1 && mb <= 4096)) return flash('uploads-msg', 'Choose between 1 and 4096 MB', false);
+  try { await api('/api/admin/settings', { json: { max_upload_mb: mb } }); await loadInfo(); flash('uploads-msg', 'Saved'); }
+  catch (e) { flash('uploads-msg', e.message, false); }
+};
+
+// ── Channels ─────────────────────────────────────────────────────────
+async function loadRooms() {
+  const rooms = await api('/api/admin/rooms');
+  const el = $('rooms'); el.innerHTML = '';
+  let channels = 0;
+  if (!rooms.length) el.innerHTML = '<div class="card empty">No categories yet — create one below.</div>';
   for (const room of rooms) {
-    const div = document.createElement('div');
-    div.className = 'room-block';
-    div.id = 'room-' + room.id;
-
-    // Fetch boards for this room (rooms endpoint accepts session token;
-    // use a dummy GET via the admin-aware boards list)
-    const bRes = await fetch('/api/rooms/' + room.id + '/boards', {
-      headers: { 'X-Owner-Key': serverData.owner_key }
-    });
+    const bRes = await fetch('/api/rooms/' + room.id + '/boards', { headers: { 'X-Owner-Key': KEY } });
     const boards = bRes.ok ? await bRes.json() : [];
-
-    const isVoiceRoom = room.room_type === 'voice';
-    const boardChips = boards.map(b => `
-      <div class="board-chip">
-        ${isVoiceRoom ? '🔊' : '#'}${b.name}
-        <button title="Delete board" onclick="deleteBoard('${b.id}', '${room.id}')">×</button>
-      </div>`).join('') || '<span style="color:var(--muted);font-size:.8rem">No boards</span>';
-
+    channels += boards.length;
+    const voice = room.room_type === 'voice';
+    const div = document.createElement('div'); div.className = 'room card';
     div.innerHTML = `
-      <div class="room-header">
-        <div><span class="room-name">${isVoiceRoom ? '🔊' : '🏠'} ${room.name}</span><span class="badge">${isVoiceRoom ? 'voice' : 'text'}</span><span class="badge">${room.is_private ? '🔒 private' : 'public'}</span></div>
-        <button class="small danger" onclick="deleteRoom('${room.id}')">Delete Room</button>
-      </div>
-      <div class="boards-list" id="boards-${room.id}">${boardChips}</div>
-      <div class="add-board-row">
-        <input type="text"     id="bname-${room.id}" placeholder="${isVoiceRoom ? 'New voice channel name (e.g. General)' : 'New board name (e.g. general)'}">
-        <input type="password" id="bkey-${room.id}"  placeholder="Owner key">
-        <button class="small" onclick="createBoard('${room.id}')">+ Board</button>
-      </div>`;
+      <div class="room-head"><div class="room-name">${voice ? icon('volume_up') : icon('tag')}${esc(room.name)}
+          <span class="tagp">${voice ? 'voice' : 'text'}</span>${room.is_private ? '<span class="tagp">private</span>' : ''}</div>
+        <button class="small danger" data-del-room>${icon('delete')}Delete</button></div>
+      <div class="boards">${boards.map(b => `<span class="chip">${voice ? '' : '#'}${esc(b.name)}<button title="Delete channel" data-del-board="${b.id}" data-name="${esc(b.name)}">${icon('close')}</button></span>`).join('') || '<span class="hint" style="margin:0">No channels</span>'}</div>
+      <div class="row"><input type="text" placeholder="${voice ? 'New voice channel (e.g. General)' : 'New channel (e.g. general)'}" style="flex:1" data-new-board>
+        <button class="small" data-add-board>${icon('add')}Add channel</button></div>`;
+    div.querySelector('[data-del-room]').onclick = () => confirmBox(`Delete “${room.name}”?`, 'This deletes the category, every channel in it, and all of their messages. It can\u2019t be undone.', 'Delete', async () => {
+      await api('/api/admin/rooms/' + room.id, { method: 'DELETE' }); loadRooms();
+    });
+    div.querySelectorAll('[data-del-board]').forEach(b => b.onclick = () => confirmBox(`Delete #${b.dataset.name}?`, 'All of its messages are deleted too.', 'Delete', async () => {
+      await api('/api/admin/boards/' + b.dataset.delBoard, { method: 'DELETE' }); loadRooms();
+    }));
+    const input = div.querySelector('[data-new-board]');
+    const add = async () => { const name = input.value.trim(); if (!name) return;
+      try { await api('/api/admin/boards', { json: { room_id: room.id, name } }); loadRooms(); } catch (e) { toast(e.message, true); } };
+    div.querySelector('[data-add-board]').onclick = add; input.onkeydown = e => { if (e.key === 'Enter') add(); };
     el.appendChild(div);
   }
+  $('st-channels').textContent = channels;
 }
+$('room-create').onclick = async () => {
+  const name = $('new-room-name').value.trim(); if (!name) return;
+  try {
+    await api('/api/admin/rooms', { json: { name, room_type: $('new-room-type').value, is_private: $('new-room-private').checked } });
+    $('new-room-name').value = ''; flash('room-msg', 'Created'); loadRooms();
+  } catch (e) { flash('room-msg', e.message, false); }
+};
 
-async function saveSettings() {
-  const ownerKey = document.getElementById('cfg-ownerkey').value;
-  const name     = document.getElementById('cfg-name').value.trim();
-  const joinKey  = document.getElementById('cfg-joinkey').value;
-  const msg      = document.getElementById('settings-msg');
-
-  const res = await fetch('/api/admin/settings', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'X-Owner-Key': ownerKey },
-    body: JSON.stringify({ server_name: name, server_key: joinKey }),
-  });
-  if (res.ok) { msg.className='msg ok'; msg.textContent='✓ Saved!'; loadAll(); }
-  else { const e=await res.json(); msg.className='msg err'; msg.textContent='✗ '+e.error; }
-}
-
-async function createRoom() {
-  const name       = document.getElementById('new-room-name').value.trim();
-  const room_type  = document.getElementById('new-room-type').value;
-  const is_private = document.getElementById('new-room-private').checked;
-  const ownerKey   = document.getElementById('new-room-key').value;
-  const msg        = document.getElementById('room-msg');
-
-  const res = await fetch('/api/admin/rooms', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'X-Owner-Key': ownerKey },
-    body: JSON.stringify({ name, room_type, is_private }),
-  });
-  if (res.ok) {
-    msg.className='msg ok'; msg.textContent='✓ Room created!';
-    document.getElementById('new-room-name').value='';
-    document.getElementById('new-room-type').value='text';
-    loadAll();
+// ── Members ──────────────────────────────────────────────────────────
+async function loadMembers() {
+  const list = await api('/api/admin/members');
+  $('st-members').textContent = list.length;
+  $('st-online').textContent = list.filter(m => m.status !== 'offline').length;
+  const tb = $('members'); tb.innerHTML = '';
+  if (!list.length) { tb.innerHTML = '<tr><td colspan="4" class="empty">Nobody has joined yet.</td></tr>'; return; }
+  for (const m of list) {
+    const tr = document.createElement('tr');
+    const st = m.status === 'idle' ? 'Away' : m.status === 'invisible' ? 'Invisible' : m.status === 'online' ? 'Online' : 'Offline';
+    tr.innerHTML = `
+      <td><div class="who"><div class="av" style="background:${colour(m.username)}">${esc(m.username[0].toUpperCase())}</div>
+        <div><div class="name">${esc(m.username)}${m.is_owner ? `<span class="crown" title="Server owner">${icon('crown')}</span>` : ''}</div>
+        <div class="fp" title="Account key fingerprint">${esc(m.fingerprint)}</div></div></div></td>
+      <td><span class="dot ${m.status === 'invisible' ? '' : m.status}"></span>${st}</td>
+      <td>${fmtDate(m.joined_at)}</td>
+      <td><div class="acts">
+        <button class="small ghost" data-crown>${icon('crown')}${m.is_owner ? 'Remove crown' : 'Make owner'}</button>
+        <button class="small ghost" data-kick>${icon('person_remove')}Kick</button>
+        <button class="small danger" data-ban>${icon('block')}Ban</button></div></td>`;
+    tr.querySelector('[data-crown]').onclick = async () => {
+      try { await api('/api/admin/owner', { json: { username: m.is_owner ? null : m.username } }); loadMembers(); }
+      catch (e) { toast(e.message, true); }
+    };
+    tr.querySelector('[data-kick]').onclick = () => kickBox(m.username, false);
+    tr.querySelector('[data-ban]').onclick = () => kickBox(m.username, true);
+    tb.appendChild(tr);
   }
-  else { const e=await res.json(); msg.className='msg err'; msg.textContent='✗ '+e.error; }
+}
+function kickBox(username, ban) {
+  confirmBox(ban ? `Ban ${username}?` : `Kick ${username}?`,
+    ban ? 'They\u2019re signed out right away and their account can\u2019t join again until you unban it.'
+        : 'They\u2019re signed out right away and removed from the member list. They can rejoin later with the join key.',
+    ban ? 'Ban' : 'Kick',
+    async reason => { await api(`/api/admin/members/${encodeURIComponent(username)}/kick`, { json: { ban, reason } }); toast(`${username} was ${ban ? 'banned' : 'kicked'}`); loadMembers(); loadBans(); },
+    true);
+}
+async function loadBans() {
+  const list = await api('/api/admin/bans');
+  const tb = $('bans'); tb.innerHTML = '';
+  if (!list.length) { tb.innerHTML = '<tr><td colspan="4" class="empty">No bans.</td></tr>'; return; }
+  for (const b of list) {
+    const tr = document.createElement('tr');
+    tr.innerHTML = `<td><div class="name">${esc(b.username)}</div><div class="fp">${esc(b.fingerprint)}</div></td>
+      <td>${esc(b.reason) || '<span class="hint">—</span>'}</td><td>${fmtDate(b.banned_at)}</td>
+      <td style="text-align:right"><button class="small ghost">Unban</button></td>`;
+    tr.querySelector('button').onclick = async () => { try { await api('/api/admin/bans/' + encodeURIComponent(b.public_key), { method: 'DELETE' }); loadBans(); } catch (e) { toast(e.message, true); } };
+    tb.appendChild(tr);
+  }
 }
 
-async function deleteRoom(roomId) {
-  const ownerKey = prompt('Enter owner key to delete this room (and all its boards):');
-  if (!ownerKey) return;
-  const res = await fetch('/api/admin/rooms/'+roomId, {
-    method: 'DELETE', headers: { 'X-Owner-Key': ownerKey },
-  });
-  if (res.ok) loadAll();
-  else { const e=await res.json(); alert('Error: '+e.error); }
+// ── Confirm dialog ───────────────────────────────────────────────────
+function confirmBox(title, text, action, run, withReason = false) {
+  const box = $('modal-box');
+  box.innerHTML = `<h3>${esc(title)}</h3><p class="hint">${esc(text)}</p>
+    ${withReason ? '<label class="f" for="modal-reason">Reason (optional, shown to them)</label><input type="text" id="modal-reason" maxlength="200">' : ''}
+    <div class="row"><span class="msg" id="modal-msg"></span><button class="ghost" id="modal-cancel">Cancel</button><button class="danger" id="modal-go">${esc(action)}</button></div>`;
+  $('modal').classList.add('on');
+  const close = () => $('modal').classList.remove('on');
+  $('modal-cancel').onclick = close;
+  $('modal-go').onclick = async () => {
+    $('modal-go').disabled = true;
+    try { await run(withReason ? $('modal-reason').value : undefined); close(); }
+    catch (e) { flash('modal-msg', e.message, false); $('modal-go').disabled = false; }
+  };
+  (withReason ? $('modal-reason') : $('modal-go')).focus();
 }
+$('modal').onclick = e => { if (e.target.id === 'modal') $('modal').classList.remove('on'); };
+document.addEventListener('keydown', e => { if (e.key === 'Escape') $('modal').classList.remove('on'); });
 
-async function createBoard(roomId) {
-  const name     = document.getElementById('bname-'+roomId).value.trim();
-  const ownerKey = document.getElementById('bkey-'+roomId).value;
-  if (!name) return;
-  const res = await fetch('/api/admin/boards', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'X-Owner-Key': ownerKey },
-    body: JSON.stringify({ room_id: roomId, name }),
-  });
-  if (res.ok) { document.getElementById('bname-'+roomId).value=''; loadAll(); }
-  else { const e=await res.json(); alert('Error: '+e.error); }
-}
-
-async function deleteBoard(boardId, roomId) {
-  const ownerKey = prompt('Enter owner key to delete this board:');
-  if (!ownerKey) return;
-  const res = await fetch('/api/admin/boards/'+boardId, {
-    method: 'DELETE', headers: { 'X-Owner-Key': ownerKey },
-  });
-  if (res.ok) loadAll();
-  else { const e=await res.json(); alert('Error: '+e.error); }
-}
-
-function copy(id) {
-  const text = document.getElementById(id).textContent;
-  navigator.clipboard.writeText(text).then(() => {
-    const el = document.getElementById(id);
-    const orig = el.textContent;
-    el.textContent = 'Copied!';
-    setTimeout(() => el.textContent = orig, 1500);
-  });
-}
-
-loadAll();
+if (KEY) signIn(KEY, !!localStorage.getItem('ownerKey'));
 </script>
 </body>
 </html>

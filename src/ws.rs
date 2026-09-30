@@ -316,7 +316,7 @@ async fn handle_socket(socket: WebSocket, token: String, initial_status: Option<
                     Ok(bcast) => {
                         if let Ok(v) = serde_json::from_str::<serde_json::Value>(&bcast) {
                             let fwd = match v["type"].as_str() {
-                                Some("users") => true,
+                                Some("users") | Some("server_updated") => true,
                                 Some("typing") => v["username"].as_str() != Some(username.as_str()),
                                 Some("rooms_updated") => true,
                                 Some("voice_state") => true,
@@ -337,6 +337,12 @@ async fn handle_socket(socket: WebSocket, token: String, initial_status: Option<
                                     v["target"].as_str() == Some(username.as_str()),
                                 _ => false,
                             };
+                            // Kicked/banned from the admin panel: pass the notice on,
+                            // then end this connection.
+                            if v["type"].as_str() == Some("kicked") && v["target"].as_str() == Some(username.as_str()) {
+                                let _ = sink.send(Message::Text(bcast)).await;
+                                break;
+                            }
                             if fwd { if sink.send(Message::Text(bcast)).await.is_err() { break; } }
                         }
                     }
@@ -400,7 +406,7 @@ fn broadcast_voice_state(state: &Arc<AppState>) {
 /// person's status ("online" or "idle"). Not "statuses" — that key already
 /// means the voice mute/deafen list on voice_status_snapshot, and the Go
 /// client decodes every server message into one struct.
-fn broadcast_users(state: &Arc<AppState>) {
+pub fn broadcast_users(state: &Arc<AppState>) {
     let (online, statuses) = {
         let o = state.online.lock().unwrap();
         let p = state.presence.lock().unwrap();
@@ -417,7 +423,8 @@ fn broadcast_users(state: &Arc<AppState>) {
     let state = Arc::clone(state);
     tokio::spawn(async move {
         let all = crate::db::all_known_users(&state.pool).await.unwrap_or_default();
-        let _ = state.tx.send(serde_json::json!({ "type": "users", "online": online, "presence": statuses, "all": all }).to_string());
+        let owner = crate::admin::owner_username(&state.pool).await;
+        let _ = state.tx.send(serde_json::json!({ "type": "users", "online": online, "presence": statuses, "all": all, "owner": owner }).to_string());
     });
 }
 

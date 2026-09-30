@@ -111,6 +111,18 @@ pub async fn init() -> Result<SqlitePool, sqlx::Error> {
     .execute(&pool)
     .await?;
 
+    // Banned account keys — refused at /api/join.
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS bans (
+            public_key TEXT PRIMARY KEY,
+            username   TEXT NOT NULL,
+            reason     TEXT NOT NULL DEFAULT '',
+            banned_at  TEXT NOT NULL
+        )",
+    )
+    .execute(&pool)
+    .await?;
+
     // ── Migrations ────────────────────────────────────────────────────────────
     // Try to add new columns to existing tables. SQLite returns an error if the
     // column already exists — we silently ignore those so this is always safe to

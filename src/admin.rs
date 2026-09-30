@@ -17,15 +17,50 @@ const ADMIN_HTML: &str = include_str!("admin.html");
 
 #[derive(Serialize)]
 pub struct AdminInfo {
-    pub owner_key:   String,
-    pub server_key:  String,
-    pub server_name: String,
+    pub server_key:        String,
+    pub server_name:       String,
+    pub description:       String,
+    pub max_upload_mb:     u64,
+    pub owner_username:    Option<String>,
+    pub banner_updated_at: i64,
 }
 
 #[derive(Deserialize)]
 pub struct UpdateSettingsReq {
-    pub server_name: Option<String>,
-    pub server_key:  Option<String>,
+    pub server_name:   Option<String>,
+    pub server_key:    Option<String>,
+    pub description:   Option<String>,
+    pub max_upload_mb: Option<u64>,
+}
+
+/// Upload size limit bounds for the setting (MB).
+pub const MIN_UPLOAD_MB: u64 = 1;
+pub const MAX_UPLOAD_MB: u64 = 4096;
+pub const DEFAULT_UPLOAD_MB: u64 = 500;
+pub const MAX_DESCRIPTION_CHARS: usize = 300;
+
+/// The configured per-file upload limit, in bytes.
+pub async fn upload_limit_bytes(pool: &sqlx::SqlitePool) -> u64 {
+    let mb = db::get_config(pool, "max_upload_mb").await.ok().flatten()
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(DEFAULT_UPLOAD_MB)
+        .clamp(MIN_UPLOAD_MB, MAX_UPLOAD_MB);
+    mb * 1024 * 1024
+}
+
+/// The member shown with the crown, if one has been chosen.
+pub async fn owner_username(pool: &sqlx::SqlitePool) -> Option<String> {
+    db::get_config(pool, "owner_username").await.ok().flatten().filter(|u| !u.is_empty())
+}
+
+pub async fn banner_updated_at(pool: &sqlx::SqlitePool) -> i64 {
+    db::get_config(pool, "banner_updated_at").await.ok().flatten()
+        .and_then(|v| v.parse().ok()).unwrap_or(0)
+}
+
+/// Tells every connected client to refetch the server's name/banner/etc.
+fn broadcast_server_updated(s: &AppState) {
+    let _ = s.tx.send(serde_json::json!({ "type": "server_updated" }).to_string());
 }
 
 #[derive(Deserialize)]
@@ -61,12 +96,17 @@ fn owner_key_from(h: &HeaderMap) -> &str {
         .unwrap_or("")
 }
 
+/// Every /api/admin route requires the owner key (printed in the server's
+/// console at startup). Compared in constant time so response timing can't
+/// be used to guess it a character at a time.
 fn check_owner(h: &HeaderMap, state: &AppState) -> Result<(), ApiErr> {
-    if owner_key_from(h) == state.owner_key {
-        Ok(())
-    } else {
-        Err(unauth())
+    let given = owner_key_from(h).as_bytes();
+    let want = state.owner_key.as_bytes();
+    let mut diff = (given.len() ^ want.len()) as u8;
+    for (i, b) in want.iter().enumerate() {
+        diff |= b ^ given.get(i).copied().unwrap_or(0);
     }
+    if !want.is_empty() && diff == 0 { Ok(()) } else { Err(unauth()) }
 }
 
 // ── Handlers ──────────────────────────────────────────────────────────────────
@@ -76,24 +116,27 @@ pub async fn admin_ui() -> Html<&'static str> {
     Html(ADMIN_HTML)
 }
 
-/// GET /api/admin/info — returns owner key, join key, and server name.
-/// This endpoint has no auth — the admin page is assumed to be LAN-only.
-/// If you expose the server publicly, put this behind a reverse proxy with IP restriction.
-pub async fn get_admin_info(State(s): State<Arc<AppState>>) -> Json<AdminInfo> {
-    let server_key = db::get_config(&s.pool, "server_key")
-        .await
-        .unwrap_or(None)
-        .unwrap_or_default();
-    let server_name = db::get_config(&s.pool, "server_name")
-        .await
-        .unwrap_or(None)
+/// GET /api/admin/info — the server's settings, for the admin panel.
+/// Requires the owner key. (It used to require nothing and returned the
+/// owner key itself, which let anyone who could reach port 7070 take over
+/// the server — the admin page now asks for the key instead.)
+pub async fn get_admin_info(
+    headers: HeaderMap,
+    State(s): State<Arc<AppState>>,
+) -> Result<Json<AdminInfo>, ApiErr> {
+    check_owner(&headers, &s)?;
+    let server_key = db::get_config(&s.pool, "server_key").await.unwrap_or(None).unwrap_or_default();
+    let server_name = db::get_config(&s.pool, "server_name").await.unwrap_or(None)
         .unwrap_or_else(|| "Chriscord Server".to_string());
-
-    Json(AdminInfo {
-        owner_key: s.owner_key.clone(),
+    let description = db::get_config(&s.pool, "server_description").await.unwrap_or(None).unwrap_or_default();
+    Ok(Json(AdminInfo {
         server_key,
         server_name,
-    })
+        description,
+        max_upload_mb: upload_limit_bytes(&s.pool).await / (1024 * 1024),
+        owner_username: owner_username(&s.pool).await,
+        banner_updated_at: banner_updated_at(&s.pool).await,
+    }))
 }
 
 /// POST /api/admin/settings — update server name and/or join key.
@@ -115,6 +158,20 @@ pub async fn update_settings(
             .await
             .map_err(|_| dberr())?;
     }
+    if let Some(desc) = body.description {
+        let desc = desc.trim();
+        if desc.chars().count() > MAX_DESCRIPTION_CHARS {
+            return Err(bad(&format!("Description is limited to {MAX_DESCRIPTION_CHARS} characters")));
+        }
+        db::set_config(&s.pool, "server_description", desc).await.map_err(|_| dberr())?;
+    }
+    if let Some(mb) = body.max_upload_mb {
+        if !(MIN_UPLOAD_MB..=MAX_UPLOAD_MB).contains(&mb) {
+            return Err(bad(&format!("Upload limit must be between {MIN_UPLOAD_MB} and {MAX_UPLOAD_MB} MB")));
+        }
+        db::set_config(&s.pool, "max_upload_mb", &mb.to_string()).await.map_err(|_| dberr())?;
+    }
+    broadcast_server_updated(&s);
 
     Ok(Json(serde_json::json!({ "ok": true })))
 }
@@ -272,5 +329,199 @@ pub async fn delete_board(
 
     let _ = s.tx.send(serde_json::json!({ "type": "rooms_updated" }).to_string());
 
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+// ── Server banner ─────────────────────────────────────────────────────────────
+
+const BANNER_MAX_BYTES: usize = 8 << 20;
+
+fn server_assets_dir() -> std::path::PathBuf {
+    let dir = std::path::PathBuf::from("./server_assets");
+    let _ = std::fs::create_dir_all(&dir);
+    dir
+}
+fn banner_path() -> std::path::PathBuf { server_assets_dir().join("banner") }
+
+/// POST /api/admin/banner — raw PNG/JPEG bytes as the request body.
+pub async fn upload_banner(
+    headers: HeaderMap,
+    State(s): State<Arc<AppState>>,
+    body: axum::body::Bytes,
+) -> Result<Json<serde_json::Value>, ApiErr> {
+    check_owner(&headers, &s)?;
+    if body.len() > BANNER_MAX_BYTES {
+        return Err(bad("Banner must be 8 MB or smaller"));
+    }
+    if !matches!(crate::pfp::image_mime(&body), Some("image/png") | Some("image/jpeg")) {
+        return Err(bad("Banner must be a PNG or JPEG image"));
+    }
+    tokio::fs::write(banner_path(), &body).await.map_err(|_| bad("Could not save the banner"))?;
+    let now = chrono::Utc::now().timestamp_millis();
+    db::set_config(&s.pool, "banner_updated_at", &now.to_string()).await.map_err(|_| dberr())?;
+    broadcast_server_updated(&s);
+    Ok(Json(serde_json::json!({ "ok": true, "banner_updated_at": now })))
+}
+
+/// DELETE /api/admin/banner — back to no banner.
+pub async fn delete_banner(
+    headers: HeaderMap,
+    State(s): State<Arc<AppState>>,
+) -> Result<Json<serde_json::Value>, ApiErr> {
+    check_owner(&headers, &s)?;
+    let _ = tokio::fs::remove_file(banner_path()).await;
+    db::set_config(&s.pool, "banner_updated_at", "0").await.map_err(|_| dberr())?;
+    broadcast_server_updated(&s);
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+/// GET /api/server/banner — the banner image, for members (session
+/// token) and the admin panel (owner key). 404 if there isn't one.
+pub async fn serve_banner(
+    headers: HeaderMap,
+    State(s): State<Arc<AppState>>,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    let is_admin = check_owner(&headers, &s).is_ok();
+    let token = headers.get("X-Session-Token").and_then(|v| v.to_str().ok()).unwrap_or("");
+    if !is_admin && db::verify_token(&s.pool, token).await.ok().flatten().is_none() {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    match tokio::fs::read(banner_path()).await {
+        Ok(data) => (
+            [(axum::http::header::CONTENT_TYPE, crate::pfp::image_mime(&data).unwrap_or("application/octet-stream"))],
+            data,
+        ).into_response(),
+        Err(_) => StatusCode::NOT_FOUND.into_response(),
+    }
+}
+
+// ── Members, owner crown, kicks and bans ─────────────────────────────────────
+
+/// GET /api/admin/members — everyone registered on this server.
+pub async fn list_members(
+    headers: HeaderMap,
+    State(s): State<Arc<AppState>>,
+) -> Result<Json<serde_json::Value>, ApiErr> {
+    check_owner(&headers, &s)?;
+    let rows = sqlx::query("SELECT public_key, username, created_at FROM users ORDER BY username COLLATE NOCASE")
+        .fetch_all(&s.pool).await.map_err(|_| dberr())?;
+    let owner = owner_username(&s.pool).await;
+    let (online, presence) = {
+        let o = s.online.lock().unwrap();
+        let p = s.presence.lock().unwrap();
+        (o.keys().cloned().collect::<std::collections::HashSet<_>>(), p.clone())
+    };
+    let members: Vec<_> = rows.iter().map(|r| {
+        let username: String = r.get("username");
+        let pk: String = r.get("public_key");
+        let status = if online.contains(&username) {
+            presence.get(&username).cloned().unwrap_or_else(|| "online".into())
+        } else { "offline".into() };
+        serde_json::json!({
+            "username": username,
+            "fingerprint": pk.get(..16).unwrap_or(&pk),
+            "joined_at": r.get::<String, _>("created_at"),
+            "status": status,
+            "is_owner": owner.as_deref() == Some(username.as_str()),
+        })
+    }).collect();
+    Ok(Json(serde_json::json!(members)))
+}
+
+#[derive(Deserialize)]
+pub struct SetOwnerReq { pub username: Option<String> }
+
+/// POST /api/admin/owner {username} — who gets the crown (null clears it).
+pub async fn set_owner(
+    headers: HeaderMap,
+    State(s): State<Arc<AppState>>,
+    Json(body): Json<SetOwnerReq>,
+) -> Result<Json<serde_json::Value>, ApiErr> {
+    check_owner(&headers, &s)?;
+    let name = body.username.map(|u| u.trim().to_string()).filter(|u| !u.is_empty());
+    if let Some(u) = &name {
+        let exists = sqlx::query("SELECT 1 FROM users WHERE username = ?").bind(u)
+            .fetch_optional(&s.pool).await.map_err(|_| dberr())?.is_some();
+        if !exists { return Err(bad("No member with that username")); }
+    }
+    db::set_config(&s.pool, "owner_username", name.as_deref().unwrap_or("")).await.map_err(|_| dberr())?;
+    crate::ws::broadcast_users(&s);
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+#[derive(Deserialize)]
+pub struct KickReq {
+    #[serde(default)]
+    pub ban:    bool,
+    #[serde(default)]
+    pub reason: String,
+}
+
+/// POST /api/admin/members/:username/kick {ban, reason}
+///
+/// Kick: signs them out everywhere (sessions deleted, open connections
+/// closed with a "kicked" notice) and removes their membership, so they
+/// drop off the member list. Like a Discord kick, they can come back by
+/// joining again (with the join key, if one is set).
+/// Ban: the same, plus their account key is refused on every future join.
+pub async fn kick_member(
+    headers: HeaderMap,
+    Path(username): Path<String>,
+    State(s): State<Arc<AppState>>,
+    Json(body): Json<KickReq>,
+) -> Result<Json<serde_json::Value>, ApiErr> {
+    check_owner(&headers, &s)?;
+    let row = sqlx::query("SELECT public_key FROM users WHERE username = ?").bind(&username)
+        .fetch_optional(&s.pool).await.map_err(|_| dberr())?
+        .ok_or_else(|| bad("No member with that username"))?;
+    let public_key: String = row.get("public_key");
+    let reason: String = body.reason.trim().chars().take(200).collect();
+
+    if body.ban {
+        sqlx::query("INSERT OR REPLACE INTO bans (public_key, username, reason, banned_at) VALUES (?, ?, ?, ?)")
+            .bind(&public_key).bind(&username).bind(&reason).bind(chrono::Utc::now().to_rfc3339())
+            .execute(&s.pool).await.map_err(|_| dberr())?;
+    }
+    sqlx::query("DELETE FROM sessions WHERE username = ?").bind(&username).execute(&s.pool).await.map_err(|_| dberr())?;
+    sqlx::query("DELETE FROM users WHERE username = ?").bind(&username).execute(&s.pool).await.map_err(|_| dberr())?;
+    if owner_username(&s.pool).await.as_deref() == Some(username.as_str()) {
+        let _ = db::set_config(&s.pool, "owner_username", "").await;
+    }
+    // Their open connections see this, pass it to the client, and close.
+    crate::ws::send_to_user(&s, &username, serde_json::json!({
+        "type": "kicked", "banned": body.ban, "reason": reason,
+    }));
+    crate::ws::broadcast_users(&s);
+    tracing::info!("admin: {} {username}", if body.ban { "banned" } else { "kicked" });
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+/// GET /api/admin/bans
+pub async fn list_bans(
+    headers: HeaderMap,
+    State(s): State<Arc<AppState>>,
+) -> Result<Json<serde_json::Value>, ApiErr> {
+    check_owner(&headers, &s)?;
+    let rows = sqlx::query("SELECT public_key, username, reason, banned_at FROM bans ORDER BY banned_at DESC")
+        .fetch_all(&s.pool).await.map_err(|_| dberr())?;
+    Ok(Json(serde_json::json!(rows.iter().map(|r| {
+        let pk: String = r.get("public_key");
+        serde_json::json!({
+            "public_key": pk, "fingerprint": pk.get(..16).unwrap_or(&pk),
+            "username": r.get::<String, _>("username"), "reason": r.get::<String, _>("reason"),
+            "banned_at": r.get::<String, _>("banned_at"),
+        })
+    }).collect::<Vec<_>>())))
+}
+
+/// DELETE /api/admin/bans/:public_key — lift a ban (they can join again).
+pub async fn unban(
+    headers: HeaderMap,
+    Path(public_key): Path<String>,
+    State(s): State<Arc<AppState>>,
+) -> Result<Json<serde_json::Value>, ApiErr> {
+    check_owner(&headers, &s)?;
+    sqlx::query("DELETE FROM bans WHERE public_key = ?").bind(&public_key).execute(&s.pool).await.map_err(|_| dberr())?;
     Ok(Json(serde_json::json!({ "ok": true })))
 }

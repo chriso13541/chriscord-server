@@ -14,7 +14,6 @@ use tokio::io::AsyncWriteExt;
 use crate::{db, state::AppState};
 
 const UPLOAD_DIR:      &str   = "./uploads";
-const MAX_FILE_BYTES:  u64    = 500 * 1024 * 1024; // 500 MB — enough for most videos
 
 #[derive(Serialize)]
 pub struct UploadResp {
@@ -68,16 +67,19 @@ pub async fn upload(
 
         let mut written: u64 = 0;
         let mut stream = field;
+        // Set in the admin panel (Uploads); 500 MB unless changed.
+        let max_bytes = crate::admin::upload_limit_bytes(&s.pool).await;
 
         loop {
             match stream.chunk().await {
                 Ok(Some(chunk)) => {
                     written += chunk.len() as u64;
-                    if written > MAX_FILE_BYTES {
+                    if written > max_bytes {
                         // Clean up partial file
                         drop(file);
                         let _ = tokio::fs::remove_file(&path).await;
-                        return Err(err(StatusCode::PAYLOAD_TOO_LARGE, "File too large (max 500 MB)"));
+                        return Err(err(StatusCode::PAYLOAD_TOO_LARGE,
+                            &format!("File too large (max {} MB on this server)", max_bytes / (1024 * 1024))));
                     }
                     file.write_all(&chunk)
                         .await
