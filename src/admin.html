@@ -59,7 +59,7 @@
   .key-box span { flex:1; word-break:break-all; }
 
   /* banner preview: the client's sidebar is ~330px wide */
-  .banner-preview { width:330px; max-width:100%; height:150px; border-radius:8px; background:var(--surface2) center/cover no-repeat; border:1px solid var(--border); position:relative; overflow:hidden; }
+  .banner-preview { width:330px; max-width:100%; height:140px; border-radius:8px; background:var(--surface2) center/cover no-repeat; border:1px solid var(--border); position:relative; overflow:hidden; }
   .banner-preview .bp-name { position:absolute; left:12px; top:10px; right:12px; font-weight:700; color:#fff; text-shadow:0 1px 4px rgba(0,0,0,.8); }
   .banner-preview.none { display:flex; align-items:center; justify-content:center; color:var(--muted); font-size:.85rem; }
   .banner-preview.none .bp-name { display:none; }
@@ -103,6 +103,19 @@
   #modal .box { background:var(--surface); border:1px solid var(--border); border-radius:10px; padding:22px; width:100%; max-width:440px; }
   #modal h3 { color:var(--strong); margin-bottom:6px; }
   #modal .row { justify-content:flex-end; margin-top:18px; }
+  /* image cropper (icon + banner) — same drag + zoom as the app's pfp cropper */
+  #cropper { position:fixed; inset:0; background:rgba(0,0,0,.65); display:none; align-items:center; justify-content:center; padding:20px; z-index:15; }
+  #cropper.on { display:flex; }
+  #cropper .box { background:var(--surface); border:1px solid var(--border); border-radius:10px; padding:22px; max-width:100%; }
+  #cropper h3 { color:var(--strong); margin-bottom:4px; }
+  #crop-vp { position:relative; overflow:hidden; margin:14px auto 0; background:var(--bg); cursor:grab; touch-action:none; user-select:none; }
+  #crop-vp.dragging { cursor:grabbing; }
+  #crop-vp.round { border-radius:50%; }
+  #crop-vp.rect { border-radius:8px; }
+  #crop-img { position:absolute; left:0; top:0; transform-origin:0 0; max-width:none; pointer-events:none; }
+  #crop-vp .crop-name { position:absolute; left:12px; top:10px; right:12px; font-weight:700; color:#fff; text-shadow:0 1px 4px rgba(0,0,0,.8); pointer-events:none; }
+  #crop-zoom { width:100%; margin-top:14px; accent-color:var(--accent); }
+  #cropper .row { justify-content:flex-end; margin-top:14px; }
   #toast { position:fixed; bottom:20px; left:50%; transform:translateX(-50%); background:var(--surface2); border:1px solid var(--border); padding:10px 16px; border-radius:8px; display:none; z-index:20; }
   #toast.on { display:block; } #toast.err { border-color:var(--red); }
   @media (max-width:760px){ #app.on{flex-direction:column} nav{width:auto;height:auto;position:static;flex-direction:row;flex-wrap:wrap} nav .spacer,nav .srv{display:none} main{padding:22px 16px} }
@@ -194,7 +207,7 @@
       <div class="card">
         <h3>Server icon</h3>
         <p class="hint">The picture shown for this server in the app's server list, instead of a coloured letter.
-          Any PNG or JPEG — it's cropped to a centred square and resized to 256×256 before uploading.</p>
+          Any PNG or JPEG — you'll be able to drag and zoom to frame it; it's saved as a 256×256 square.</p>
         <div class="icon-row">
           <div class="icon-preview" id="icon-preview"></div>
           <div class="icon-list-demo"><div class="mini" id="icon-mini"></div><div><b id="icon-demo-name">Server</b><span>How it looks in the server list</span></div></div>
@@ -206,8 +219,8 @@
       </div>
       <div class="card">
         <h3>Server banner</h3>
-        <p class="hint">Shown at the top of the channel list, like Discord's server banner. PNG or JPEG up to 8 MB;
-          it's cropped to fill, so a wide image around 960×440 works best.</p>
+        <p class="hint">Shown at the top of the channel list, like Discord's server banner. Any PNG or JPEG — you'll be able to
+          drag and zoom to frame it in the same shape the app shows it.</p>
         <div style="margin-top:14px" class="banner-preview none" id="banner-preview"><span class="bp-name" id="bp-name"></span><span id="bp-empty">No banner</span></div>
         <div class="row" style="margin-top:12px">
           <input type="file" id="banner-file" accept="image/png,image/jpeg" hidden>
@@ -268,6 +281,13 @@
 </div>
 
 <div id="modal"><div class="box" id="modal-box"></div></div>
+<div id="cropper"><div class="box">
+  <h3 id="crop-title">Adjust image</h3>
+  <p class="hint">Drag to reposition, and use the slider to zoom.</p>
+  <div id="crop-vp"><img id="crop-img" alt="" draggable="false"><span class="crop-name" id="crop-name"></span></div>
+  <input type="range" id="crop-zoom" min="1" max="4" step="0.01" value="1" aria-label="Zoom">
+  <div class="row"><span class="msg" id="crop-msg"></span><button class="ghost" id="crop-cancel">Cancel</button><button id="crop-apply">Upload</button></div>
+</div></div>
 <div id="toast"></div>
 
 <script>
@@ -364,12 +384,17 @@ $('custom-save').onclick = async () => {
   catch (e) { flash('custom-msg', e.message, false); }
 };
 $('banner-choose').onclick = () => $('banner-file').click();
+// The app draws the banner across its channel list header — 330×140 at
+// the default sidebar width — so the crop box uses that exact shape, and
+// what you frame here is what members see. Saved at 3× for sharp screens.
+const BANNER_VIEW = { w: 330, h: 140 }, BANNER_OUT = { w: 990, h: 420 };
 $('banner-file').onchange = async () => {
   const f = $('banner-file').files[0]; $('banner-file').value = '';
   if (!f) return;
-  if (f.size > 8 * 1024 * 1024) return flash('banner-msg', 'That image is over 8 MB', false);
+  const blob = await cropImage(f, { title: 'Adjust banner', view: BANNER_VIEW, out: BANNER_OUT, round: false, label: $('cfg-name').value || info.server_name });
+  if (!blob) return; // cancelled
   try {
-    const r = await api('/api/admin/banner', { method: 'POST', body: f, headers: { 'Content-Type': f.type } });
+    const r = await api('/api/admin/banner', { method: 'POST', body: blob, headers: { 'Content-Type': blob.type } });
     info.banner_updated_at = r.banner_updated_at; await showBanner(); flash('banner-msg', 'Banner updated');
   } catch (e) { flash('banner-msg', e.message, false); }
 };
@@ -397,23 +422,65 @@ async function showIcon(refetch = true) {
   }
   els.forEach(el => { el.textContent = ''; el.style.backgroundColor = ''; el.style.backgroundImage = `url("${iconURL}")`; });
 }
-// Centre-crops to a square and scales to 256×256 in the browser, so the
-// server only ever stores a small icon. PNG in → PNG out (keeps any
-// transparency); JPEG in → JPEG out.
-function squareIcon(file) {
-  return new Promise((resolve, reject) => {
-    const img = new Image(), url = URL.createObjectURL(file);
-    img.onload = () => {
-      const side = Math.min(img.naturalWidth, img.naturalHeight), out = Math.min(256, side);
-      const c = document.createElement('canvas'); c.width = c.height = out;
-      const ctx = c.getContext('2d'); ctx.imageSmoothingQuality = 'high';
-      ctx.drawImage(img, (img.naturalWidth - side) / 2, (img.naturalHeight - side) / 2, side, side, 0, 0, out, out);
-      URL.revokeObjectURL(url);
-      const type = file.type === 'image/jpeg' ? 'image/jpeg' : 'image/png';
-      c.toBlob(b => b ? resolve(b) : reject(new Error('Could not process that image')), type, 0.92);
+// ── Image cropper ────────────────────────────────────────────────────
+// Drag to pan, slider (or mouse wheel) to zoom — the image always covers
+// the whole crop box, so there are never empty edges. Resolves with the
+// cropped image as a Blob at opts.out size (capped by the source's own
+// resolution, never upscaled past it), or null if cancelled. PNG in →
+// PNG out (keeps transparency); anything else → JPEG.
+function cropImage(file, opts) {
+  return new Promise(resolve => {
+    const url = URL.createObjectURL(file), img = $('crop-img'), vp = $('crop-vp'), zoom = $('crop-zoom');
+    const probe = new Image();
+    probe.onerror = () => { URL.revokeObjectURL(url); toast('That file isn\u2019t a readable image', true); resolve(null); };
+    probe.onload = () => {
+      const nw = probe.naturalWidth, nh = probe.naturalHeight, { w: vw, h: vh } = opts.view;
+      vp.style.width = vw + 'px'; vp.style.height = vh + 'px';
+      vp.className = opts.round ? 'round' : 'rect';
+      $('crop-name').textContent = opts.round ? '' : (opts.label || '');
+      $('crop-title').textContent = opts.title; $('crop-msg').textContent = '';
+      img.src = url;
+      const base = Math.max(vw / nw, vh / nh);
+      let z = 1, tx = (vw - nw * base) / 2, ty = (vh - nh * base) / 2, drag = null;
+      const clamp = () => { const sc = base * z; tx = Math.min(0, Math.max(vw - nw * sc, tx)); ty = Math.min(0, Math.max(vh - nh * sc, ty)); };
+      const draw = () => { img.style.transform = `translate(${tx}px,${ty}px) scale(${base * z})`; };
+      const zoomTo = (nz, cx = vw / 2, cy = vh / 2) => {
+        const old = base * z, px = (cx - tx) / old, py = (cy - ty) / old;
+        z = Math.min(4, Math.max(1, nz)); const sc = base * z;
+        tx = cx - px * sc; ty = cy - py * sc; clamp(); draw(); zoom.value = z;
+      };
+      zoom.value = 1; draw();
+      zoom.oninput = () => zoomTo(parseFloat(zoom.value));
+      vp.onwheel = e => { e.preventDefault(); const r = vp.getBoundingClientRect(); zoomTo(z * Math.exp(-e.deltaY * 0.0015), e.clientX - r.left, e.clientY - r.top); };
+      const start = e => { const p = e.touches ? e.touches[0] : e; drag = { x: p.clientX, y: p.clientY, tx, ty }; vp.classList.add('dragging'); e.preventDefault(); };
+      const move = e => { if (!drag) return; const p = e.touches ? e.touches[0] : e; tx = drag.tx + p.clientX - drag.x; ty = drag.ty + p.clientY - drag.y; clamp(); draw(); };
+      const end = () => { drag = null; vp.classList.remove('dragging'); };
+      vp.onmousedown = start; vp.ontouchstart = start;
+      window.addEventListener('mousemove', move); window.addEventListener('touchmove', move, { passive: true });
+      window.addEventListener('mouseup', end); window.addEventListener('touchend', end);
+      const finish = result => {
+        window.removeEventListener('mousemove', move); window.removeEventListener('touchmove', move);
+        window.removeEventListener('mouseup', end); window.removeEventListener('touchend', end);
+        document.removeEventListener('keydown', onKey, true);
+        $('cropper').classList.remove('on'); URL.revokeObjectURL(url); resolve(result);
+      };
+      const onKey = e => { if (e.key === 'Escape') { e.stopImmediatePropagation(); finish(null); } };
+      document.addEventListener('keydown', onKey, true);
+      $('crop-cancel').onclick = () => finish(null);
+      $('cropper').onclick = e => { if (e.target.id === 'cropper') finish(null); };
+      $('crop-apply').onclick = () => {
+        const sc = base * z, sx = -tx / sc, sy = -ty / sc, sw = vw / sc, sh = vh / sc;
+        const k = Math.min(1, sw / opts.out.w); // don't upscale beyond the source
+        const c = document.createElement('canvas');
+        c.width = Math.max(1, Math.round(opts.out.w * k)); c.height = Math.max(1, Math.round(opts.out.h * k));
+        const ctx = c.getContext('2d'); ctx.imageSmoothingQuality = 'high';
+        ctx.drawImage(img, sx, sy, sw, sh, 0, 0, c.width, c.height);
+        const type = file.type === 'image/png' ? 'image/png' : 'image/jpeg';
+        c.toBlob(b => b ? finish(b) : ($('crop-msg').className = 'msg err', $('crop-msg').textContent = 'Could not process that image'), type, 0.92);
+      };
+      $('cropper').classList.add('on');
     };
-    img.onerror = () => { URL.revokeObjectURL(url); reject(new Error('That file isn\u2019t a readable image')); };
-    img.src = url;
+    probe.src = url;
   });
 }
 $('icon-choose').onclick = () => $('icon-file').click();
@@ -421,7 +488,8 @@ $('icon-file').onchange = async () => {
   const f = $('icon-file').files[0]; $('icon-file').value = '';
   if (!f) return;
   try {
-    const blob = await squareIcon(f);
+    const blob = await cropImage(f, { title: 'Adjust server icon', view: { w: 256, h: 256 }, out: { w: 256, h: 256 }, round: true });
+    if (!blob) return; // cancelled
     const r = await api('/api/admin/icon', { method: 'POST', body: blob, headers: { 'Content-Type': blob.type } });
     info.icon_updated_at = r.icon_updated_at; await showIcon(); flash('icon-msg', 'Icon updated');
   } catch (e) { flash('icon-msg', e.message, false); }
