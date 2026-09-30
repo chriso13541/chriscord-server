@@ -290,7 +290,7 @@ async fn handle_socket(socket: WebSocket, token: String, state: Arc<AppState>) {
                                 Some("voice_mute_state") => true,
                                 Some("pfp_updated") | Some("profile_updated") => true,
                                 Some("message") => true,
-                                Some("message_edit") | Some("message_delete") | Some("message_pin") => subscribed_board.as_deref()
+                                Some("message_edit") | Some("message_delete") | Some("message_pin") | Some("message_reaction") => subscribed_board.as_deref()
                                     .map(|bid| v["board_id"].as_str() == Some(bid))
                                     .unwrap_or(false),
                                 Some("voice_answer") | Some("voice_ice") | Some("voice_status_snapshot") | Some("voice_renegotiate") | Some("pfp_request") | Some("profile_request") =>
@@ -370,7 +370,9 @@ async fn load_history(state: &Arc<AppState>, board_id: &str) -> Vec<serde_json::
         Err(e) => { tracing::error!("load_history: {}", e); return vec![]; }
     };
     rows.reverse();
-    rows.iter().filter_map(|r| serde_json::to_value(row_to_msg(r)).ok()).collect()
+    let mut msgs: Vec<crate::messages::ChatMessage> = rows.iter().map(row_to_msg).collect();
+    crate::messages::attach_reactions(&state.pool, &mut msgs).await;
+    msgs.iter().filter_map(|m| serde_json::to_value(m).ok()).collect()
 }
 
 async fn save_and_broadcast(
@@ -394,7 +396,7 @@ async fn save_and_broadcast(
 
     let msg = crate::messages::ChatMessage {
         id, board_id: board_id.to_string(), username: username.to_string(),
-        content: content.to_string(), attachments, edited: false, created_at: now, pinned: false,
+        content: content.to_string(), attachments, edited: false, created_at: now, pinned: false, reactions: Vec::new(),
     };
     let _ = state.tx.send(serde_json::json!({ "type": "message", "data": msg }).to_string());
 }

@@ -81,6 +81,7 @@ async fn main() {
         .route("/api/messages/:id",
             patch(messages::edit_message).delete(messages::delete_message))
         .route("/api/boards/:id/pins",   get(messages::get_pins))
+        .route("/api/messages/:id/reactions", post(messages::react))
         .route("/api/messages/:id/pin",  put(messages::pin_message).delete(messages::unpin_message))
         .route("/api/upload", post(files::upload)
             .layer(DefaultBodyLimit::disable()))

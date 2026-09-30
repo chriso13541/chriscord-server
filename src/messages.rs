@@ -55,6 +55,18 @@ pub struct ChatMessage {
     /// produced before this field existed still deserializes.
     #[serde(default)]
     pub pinned:      bool,
+    /// Emoji reactions, in the order each emoji was first added.
+    #[serde(default)]
+    pub reactions:   Vec<Reaction>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Reaction {
+    pub emoji: String,
+    pub count: usize,
+    /// Who reacted, in order — lets clients show "you reacted" and a
+    /// hover list of names without another request.
+    pub users: Vec<String>,
 }
 
 /// A ChatMessage plus which board (and its room) it came from — only
@@ -123,6 +135,7 @@ pub fn row_to_msg(r: &sqlx::sqlite::SqliteRow) -> ChatMessage {
         edited:      r.try_get::<i64, _>("edited").unwrap_or(0) != 0,
         created_at:  r.get("created_at"),
         pinned:      r.try_get::<Option<String>, _>("pinned_at").ok().flatten().is_some(),
+        reactions:   Vec::new(), // filled in by attach_reactions
     }
 }
 
@@ -180,7 +193,9 @@ pub async fn get_messages(
     // back to chronological order before handing them to the client.
     rows.reverse();
 
-    Ok(Json(rows.iter().map(row_to_msg).collect()))
+    let mut msgs: Vec<ChatMessage> = rows.iter().map(row_to_msg).collect();
+    attach_reactions(&s.pool, &mut msgs).await;
+    Ok(Json(msgs))
 }
 
 /// Fetches a window of messages centered on a specific one — half the page
@@ -218,6 +233,7 @@ pub async fn get_messages_around(
 
     let mut result: Vec<ChatMessage> = before_and_target.iter().map(row_to_msg).collect();
     result.extend(after.iter().map(row_to_msg));
+    attach_reactions(&s.pool, &mut result).await;
 
     Ok(Json(result))
 }
@@ -266,6 +282,9 @@ pub async fn search_messages(
         .take(SEARCH_LIMIT)
         .collect();
     matches.reverse(); // newest-first -> chronological, matching get_messages
+    let mut msgs: Vec<ChatMessage> = matches.iter().map(|m| m.message.clone()).collect();
+    attach_reactions(&s.pool, &mut msgs).await;
+    for (m, with) in matches.iter_mut().zip(msgs) { m.message.reactions = with.reactions; }
 
     Ok(Json(matches))
 }
@@ -328,7 +347,7 @@ pub async fn post_message(
     .bind(&attachments_json).bind(&now)
     .execute(&s.pool).await.map_err(|_| db_err())?;
 
-    let msg = ChatMessage { id, board_id, username, content, attachments, edited: false, created_at: now, pinned: false };
+    let msg = ChatMessage { id, board_id, username, content, attachments, edited: false, created_at: now, pinned: false, reactions: Vec::new() };
     let _ = s.tx.send(serde_json::json!({ "type": "message", "data": msg }).to_string());
     Ok(Json(msg))
 }
@@ -388,6 +407,7 @@ pub async fn delete_message(
     let board_id: String = row.get("board_id");
 
     sqlx::query("DELETE FROM messages WHERE id = ?").bind(&id).execute(&s.pool).await.map_err(|_| db_err())?;
+    let _ = sqlx::query("DELETE FROM reactions WHERE message_id = ?").bind(&id).execute(&s.pool).await;
 
     let _ = s.tx.send(serde_json::json!({
         "type": "message_delete", "id": id, "board_id": board_id,
@@ -414,7 +434,9 @@ pub async fn get_pins(
     let rows = sqlx::query(&format!(
         "{} WHERE board_id = ? AND pinned_at IS NOT NULL ORDER BY pinned_at DESC", SELECT
     )).bind(&board_id).fetch_all(&s.pool).await.map_err(|_| db_err())?;
-    Ok(Json(rows.iter().map(row_to_msg).collect()))
+    let mut msgs: Vec<ChatMessage> = rows.iter().map(row_to_msg).collect();
+    attach_reactions(&s.pool, &mut msgs).await;
+    Ok(Json(msgs))
 }
 
 /// PUT /api/messages/:id/pin — pins it (idempotent: re-pinning keeps the
@@ -457,4 +479,111 @@ async fn set_pinned(s: &AppState, headers: &HeaderMap, id: &str, pinned: bool) -
         "type": "message_pin", "id": id, "board_id": board_id, "pinned": pinned, "by": username,
     }).to_string());
     Ok(Json(serde_json::json!({ "ok": true, "pinned": pinned })))
+}
+
+// ── Reactions ─────────────────────────────────────────────────────────────────
+
+/// Most distinct emoji one message can collect — well past what any real
+/// conversation uses, but bounded so a script can't grow one row forever.
+pub const MAX_REACTION_EMOJI: usize = 50;
+
+/// Fills in `reactions` for a batch of messages with one query.
+pub async fn attach_reactions(pool: &sqlx::SqlitePool, msgs: &mut [ChatMessage]) {
+    if msgs.is_empty() {
+        return;
+    }
+    let placeholders = vec!["?"; msgs.len()].join(",");
+    let sql = format!(
+        "SELECT message_id, emoji, username FROM reactions WHERE message_id IN ({placeholders})
+         ORDER BY message_id, created_at, rowid"
+    );
+    let mut q = sqlx::query(&sql);
+    for m in msgs.iter() {
+        q = q.bind(&m.id);
+    }
+    let rows = match q.fetch_all(pool).await {
+        Ok(r) => r,
+        Err(e) => { tracing::warn!("reactions: load failed: {e}"); return; }
+    };
+    let mut by_msg: std::collections::HashMap<String, Vec<Reaction>> = std::collections::HashMap::new();
+    for r in &rows {
+        let list = by_msg.entry(r.get("message_id")).or_default();
+        let emoji: String = r.get("emoji");
+        let user: String = r.get("username");
+        match list.iter_mut().find(|x| x.emoji == emoji) {
+            Some(x) => { x.count += 1; x.users.push(user); }
+            None => list.push(Reaction { emoji, count: 1, users: vec![user] }),
+        }
+    }
+    for m in msgs.iter_mut() {
+        if let Some(list) = by_msg.remove(&m.id) {
+            m.reactions = list;
+        }
+    }
+}
+
+/// A reaction must look like a single emoji: short, no whitespace or
+/// control characters. The client only ever sends picker emoji; this just
+/// keeps arbitrary text out of the table.
+fn valid_reaction_emoji(e: &str) -> bool {
+    !e.is_empty() && e.len() <= 64 && e.chars().count() <= 16
+        && !e.chars().any(|c| c.is_whitespace() || c.is_control() || c.is_ascii_alphanumeric())
+}
+
+#[derive(Deserialize)]
+pub struct ReactBody {
+    pub emoji: String,
+    /// true = add your reaction, false = remove it.
+    pub on:    bool,
+}
+
+/// POST /api/messages/:id/reactions {emoji, on} — adds or removes your
+/// reaction, then broadcasts the change to everyone viewing that channel.
+pub async fn react(
+    headers:  HeaderMap,
+    Path(id): Path<String>,
+    State(s): State<Arc<AppState>>,
+    Json(body): Json<ReactBody>,
+) -> Result<Json<serde_json::Value>, ApiErr> {
+    let username = db::verify_token(&s.pool, token_from(&headers)).await
+        .map_err(|_| db_err())?.ok_or_else(unauth)?;
+    let emoji = body.emoji.trim().to_string();
+    if !valid_reaction_emoji(&emoji) {
+        return Err((StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": "Not a valid reaction" }))));
+    }
+    let row = sqlx::query("SELECT board_id FROM messages WHERE id = ?")
+        .bind(&id).fetch_optional(&s.pool).await.map_err(|_| db_err())?
+        .ok_or_else(not_found)?;
+    let board_id: String = row.get("board_id");
+
+    let changed = if body.on {
+        // A brand-new emoji on this message counts against the cap; adding
+        // yourself to an existing one never does.
+        let exists = sqlx::query("SELECT 1 FROM reactions WHERE message_id = ? AND emoji = ? LIMIT 1")
+            .bind(&id).bind(&emoji).fetch_optional(&s.pool).await.map_err(|_| db_err())?.is_some();
+        if !exists {
+            let distinct: i64 = sqlx::query("SELECT COUNT(DISTINCT emoji) AS n FROM reactions WHERE message_id = ?")
+                .bind(&id).fetch_one(&s.pool).await.map_err(|_| db_err())?.get("n");
+            if distinct as usize >= MAX_REACTION_EMOJI {
+                return Err((StatusCode::BAD_REQUEST, Json(serde_json::json!({
+                    "error": format!("This message already has {MAX_REACTION_EMOJI} different reactions")
+                }))));
+            }
+        }
+        sqlx::query("INSERT OR IGNORE INTO reactions (message_id, emoji, username, created_at) VALUES (?, ?, ?, ?)")
+            .bind(&id).bind(&emoji).bind(&username).bind(chrono::Utc::now().to_rfc3339())
+            .execute(&s.pool).await.map_err(|_| db_err())?.rows_affected() > 0
+    } else {
+        sqlx::query("DELETE FROM reactions WHERE message_id = ? AND emoji = ? AND username = ?")
+            .bind(&id).bind(&emoji).bind(&username)
+            .execute(&s.pool).await.map_err(|_| db_err())?.rows_affected() > 0
+    };
+
+    if changed {
+        let _ = s.tx.send(serde_json::json!({
+            "type": "message_reaction", "id": id, "board_id": board_id,
+            "emoji": emoji, "username": username, "on": body.on,
+        }).to_string());
+    }
+    Ok(Json(serde_json::json!({ "ok": true })))
 }

@@ -96,6 +96,21 @@ pub async fn init() -> Result<SqlitePool, sqlx::Error> {
     .execute(&pool)
     .await?;
 
+    // Emoji reactions: one row per (message, emoji, person). The primary key
+    // makes reacting idempotent; created_at orders a message's reactions by
+    // when each emoji was first used on it.
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS reactions (
+            message_id TEXT NOT NULL,
+            emoji      TEXT NOT NULL,
+            username   TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            PRIMARY KEY (message_id, emoji, username)
+        )",
+    )
+    .execute(&pool)
+    .await?;
+
     // ── Migrations ────────────────────────────────────────────────────────────
     // Try to add new columns to existing tables. SQLite returns an error if the
     // column already exists — we silently ignore those so this is always safe to
