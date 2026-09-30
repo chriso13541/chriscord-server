@@ -246,23 +246,25 @@
       <div class="card">
         <h3>Server icon</h3>
         <p class="hint">The picture shown for this server in the app's server list, instead of a coloured letter.
-          Any PNG or JPEG — you'll be able to drag and zoom to frame it; it's saved as a 256×256 square.</p>
+          PNG, JPEG, WebP, BMP, AVIF or an animated GIF/WebP/APNG. Still images can be dragged and zoomed to frame them
+          (saved as a 256×256 square); animated ones are kept as-is so they keep moving.</p>
         <div class="icon-row">
           <div class="icon-preview" id="icon-preview"></div>
           <div class="icon-list-demo"><div class="mini" id="icon-mini"></div><div><b id="icon-demo-name">Server</b><span>How it looks in the server list</span></div></div>
         </div>
         <div class="row" style="margin-top:12px">
-          <input type="file" id="icon-file" accept="image/png,image/jpeg" hidden>
+          <input type="file" id="icon-file" accept="image/png,image/jpeg,image/gif,image/webp,image/bmp,image/avif,.apng" hidden>
           <button id="icon-choose"><svg class="ic"><use href="#i-image"/></svg>Upload icon</button>
           <button class="ghost" id="icon-remove">Remove</button><span class="msg" id="icon-msg"></span></div>
       </div>
       <div class="card">
         <h3>Server banner</h3>
-        <p class="hint">Shown at the top of the channel list, like Discord's server banner. Any PNG or JPEG — you'll be able to
-          drag and zoom to frame it in the same shape the app shows it.</p>
+        <p class="hint">Shown at the top of the channel list, like Discord's server banner. PNG, JPEG, WebP, BMP, AVIF, or an
+          animated GIF/WebP/APNG. Still images can be dragged and zoomed to frame them in the shape the app shows; animated
+          ones are kept as-is (filled and centred) so they keep moving.</p>
         <div style="margin-top:14px" class="banner-preview none" id="banner-preview"><span class="bp-name" id="bp-name"></span><span id="bp-empty">No banner</span></div>
         <div class="row" style="margin-top:12px">
-          <input type="file" id="banner-file" accept="image/png,image/jpeg" hidden>
+          <input type="file" id="banner-file" accept="image/png,image/jpeg,image/gif,image/webp,image/bmp,image/avif,.apng" hidden>
           <button id="banner-choose"><svg class="ic"><use href="#i-image"/></svg>Upload banner</button>
           <button class="ghost" id="banner-remove">Remove</button><span class="msg" id="banner-msg"></span></div>
       </div>
@@ -370,7 +372,7 @@
 <div id="modal"><div class="box" id="modal-box"></div></div>
 <div id="cropper"><div class="box">
   <h3 id="crop-title">Adjust image</h3>
-  <p class="hint">Drag to reposition, and use the slider to zoom.</p>
+  <p class="hint" id="crop-hint">Drag to reposition, and use the slider to zoom.</p>
   <div id="crop-vp"><img id="crop-img" alt="" draggable="false"><span class="crop-name" id="crop-name"></span></div>
   <input type="range" id="crop-zoom" min="1" max="4" step="0.01" value="1" aria-label="Zoom">
   <div class="row"><span class="msg" id="crop-msg"></span><button class="ghost" id="crop-cancel">Cancel</button><button id="crop-apply">Upload</button></div>
@@ -481,7 +483,7 @@ $('banner-file').onchange = async () => {
   const blob = await cropImage(f, { title: 'Adjust banner', view: BANNER_VIEW, out: BANNER_OUT, round: false, label: $('cfg-name').value || info.server_name });
   if (!blob) return; // cancelled
   try {
-    const r = await api('/api/admin/banner', { method: 'POST', body: blob, headers: { 'Content-Type': blob.type } });
+    const r = await api('/api/admin/banner', { method: 'POST', body: blob, headers: { 'Content-Type': blob.type || 'application/octet-stream' } });
     info.banner_updated_at = r.banner_updated_at; await showBanner(); flash('banner-msg', 'Banner updated');
   } catch (e) { flash('banner-msg', e.message, false); }
 };
@@ -509,6 +511,26 @@ async function showIcon(refetch = true) {
   }
   els.forEach(el => { el.textContent = ''; el.style.backgroundColor = ''; el.style.backgroundImage = `url("${iconURL}")`; });
 }
+// ── Animated images ──────────────────────────────────────────────────
+// GIF, animated WebP and APNG are uploaded byte-for-byte: drawing them to
+// a canvas (which is how cropping works) would keep only the first frame.
+function isAnimatedImage(b) {
+  const s = (a, z) => String.fromCharCode(...b.subarray(a, z));
+  if (b.length < 16) return false;
+  if (s(0, 4) === 'GIF8') {           // more than one frame = animated
+    let n = 0; for (let i = 0; i < b.length - 1; i++) if (b[i] === 0x21 && b[i + 1] === 0xF9 && ++n > 1) return true;
+    return false;
+  }
+  if (s(0, 4) === 'RIFF' && s(8, 12) === 'WEBP') return s(12, 16) === 'VP8X' && (b[20] & 0x02) !== 0;
+  if (b[0] === 0x89 && s(1, 4) === 'PNG') { // APNG: an acTL chunk before the image data
+    for (let i = 8; i + 8 <= b.length;) {
+      const len = ((b[i] << 24) | (b[i + 1] << 16) | (b[i + 2] << 8) | b[i + 3]) >>> 0, t = s(i + 4, i + 8);
+      if (t === 'acTL') return true; if (t === 'IDAT') return false; i += 12 + len;
+    }
+  }
+  return false;
+}
+
 // ── Image cropper ────────────────────────────────────────────────────
 // Drag to pan, slider (or mouse wheel) to zoom — the image always covers
 // the whole crop box, so there are never empty edges. Resolves with the
@@ -516,7 +538,8 @@ async function showIcon(refetch = true) {
 // resolution, never upscaled past it), or null if cancelled. PNG in →
 // PNG out (keeps transparency); anything else → JPEG.
 function cropImage(file, opts) {
-  return new Promise(resolve => {
+  return new Promise(async resolve => {
+    const animated = isAnimatedImage(new Uint8Array(await file.arrayBuffer()));
     const url = URL.createObjectURL(file), img = $('crop-img'), vp = $('crop-vp'), zoom = $('crop-zoom');
     const probe = new Image();
     probe.onerror = () => { URL.revokeObjectURL(url); toast('That file isn\u2019t a readable image', true); resolve(null); };
@@ -526,6 +549,12 @@ function cropImage(file, opts) {
       vp.className = opts.round ? 'round' : 'rect';
       $('crop-name').textContent = opts.round ? '' : (opts.label || '');
       $('crop-title').textContent = opts.title; $('crop-msg').textContent = '';
+      // Animated: shown filled and centred (how the app displays it), with
+      // drag/zoom off, and uploaded unchanged so it keeps moving.
+      $('crop-hint').textContent = animated
+        ? 'Animated image \u2014 it\u2019s kept exactly as it is so it keeps moving, filled and centred like this. (Cropping would freeze it on one frame.)'
+        : 'Drag to reposition, and use the slider to zoom.';
+      zoom.disabled = animated; vp.style.cursor = animated ? 'default' : '';
       img.src = url;
       const base = Math.max(vw / nw, vh / nh);
       let z = 1, tx = (vw - nw * base) / 2, ty = (vh - nh * base) / 2, drag = null;
@@ -538,8 +567,8 @@ function cropImage(file, opts) {
       };
       zoom.value = 1; draw();
       zoom.oninput = () => zoomTo(parseFloat(zoom.value));
-      vp.onwheel = e => { e.preventDefault(); const r = vp.getBoundingClientRect(); zoomTo(z * Math.exp(-e.deltaY * 0.0015), e.clientX - r.left, e.clientY - r.top); };
-      const start = e => { const p = e.touches ? e.touches[0] : e; drag = { x: p.clientX, y: p.clientY, tx, ty }; vp.classList.add('dragging'); e.preventDefault(); };
+      vp.onwheel = e => { e.preventDefault(); if (animated) return; const r = vp.getBoundingClientRect(); zoomTo(z * Math.exp(-e.deltaY * 0.0015), e.clientX - r.left, e.clientY - r.top); };
+      const start = e => { if (animated) return; const p = e.touches ? e.touches[0] : e; drag = { x: p.clientX, y: p.clientY, tx, ty }; vp.classList.add('dragging'); e.preventDefault(); };
       const move = e => { if (!drag) return; const p = e.touches ? e.touches[0] : e; tx = drag.tx + p.clientX - drag.x; ty = drag.ty + p.clientY - drag.y; clamp(); draw(); };
       const end = () => { drag = null; vp.classList.remove('dragging'); };
       vp.onmousedown = start; vp.ontouchstart = start;
@@ -556,13 +585,18 @@ function cropImage(file, opts) {
       $('crop-cancel').onclick = () => finish(null);
       $('cropper').onclick = e => { if (e.target.id === 'cropper') finish(null); };
       $('crop-apply').onclick = () => {
+        if (animated) {
+          if (file.size > 8 * 1024 * 1024) { $('crop-msg').className = 'msg err'; $('crop-msg').textContent = 'Animated images must be 8 MB or smaller'; return; }
+          return finish(file);
+        }
         const sc = base * z, sx = -tx / sc, sy = -ty / sc, sw = vw / sc, sh = vh / sc;
         const k = Math.min(1, sw / opts.out.w); // don't upscale beyond the source
         const c = document.createElement('canvas');
         c.width = Math.max(1, Math.round(opts.out.w * k)); c.height = Math.max(1, Math.round(opts.out.h * k));
         const ctx = c.getContext('2d'); ctx.imageSmoothingQuality = 'high';
         ctx.drawImage(img, sx, sy, sw, sh, 0, 0, c.width, c.height);
-        const type = file.type === 'image/png' ? 'image/png' : 'image/jpeg';
+        // Formats that can be transparent come out as PNG; photos as JPEG.
+        const type = /^image\/(png|webp|gif|avif)$/.test(file.type) ? 'image/png' : 'image/jpeg';
         c.toBlob(b => b ? finish(b) : ($('crop-msg').className = 'msg err', $('crop-msg').textContent = 'Could not process that image'), type, 0.92);
       };
       $('cropper').classList.add('on');
@@ -577,7 +611,7 @@ $('icon-file').onchange = async () => {
   try {
     const blob = await cropImage(f, { title: 'Adjust server icon', view: { w: 256, h: 256 }, out: { w: 256, h: 256 }, round: true });
     if (!blob) return; // cancelled
-    const r = await api('/api/admin/icon', { method: 'POST', body: blob, headers: { 'Content-Type': blob.type } });
+    const r = await api('/api/admin/icon', { method: 'POST', body: blob, headers: { 'Content-Type': blob.type || 'application/octet-stream' } });
     info.icon_updated_at = r.icon_updated_at; await showIcon(); flash('icon-msg', 'Icon updated');
   } catch (e) { flash('icon-msg', e.message, false); }
 };

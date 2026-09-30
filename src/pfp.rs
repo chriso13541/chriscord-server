@@ -89,9 +89,23 @@ pub fn image_mime(bytes: &[u8]) -> Option<&'static str> {
         Some("image/gif")
     } else if bytes.len() >= 12 && &bytes[0..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
         Some("image/webp")
+    } else if bytes.starts_with(b"BM") && bytes.len() > 26 {
+        Some("image/bmp")
+    } else if bytes.len() >= 12 && &bytes[4..8] == b"ftyp" && (&bytes[8..12] == b"avif" || &bytes[8..12] == b"avis") {
+        Some("image/avif")
     } else {
         None
     }
+}
+
+/// Image types accepted for profile pictures, profile/server banners and
+/// the server icon: the common static formats plus the animated ones
+/// (GIF, animated WebP, APNG — which is a PNG). Animated files are stored
+/// and served byte-for-byte, so they keep moving. Server theme backgrounds
+/// stay static and have their own check.
+pub fn is_profile_image(bytes: &[u8]) -> bool {
+    matches!(image_mime(bytes),
+        Some("image/png" | "image/jpeg" | "image/gif" | "image/webp" | "image/bmp" | "image/avif"))
 }
 
 /// Writes a new cached picture and its timestamp, overwriting whatever
@@ -102,7 +116,7 @@ pub fn save_cached(username: &str, png_bytes: &[u8], updated_at: i64) -> std::io
     };
     // Static PNG/JPEG only for now — GIF/WebP get sniffed above so serving
     // them later is ready, but accepting them waits on animated-pfp work.
-    if !matches!(image_mime(png_bytes), Some("image/png") | Some("image/jpeg")) {
+    if !is_profile_image(png_bytes) {
         return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "not a PNG or JPEG image"));
     }
     if png_bytes.len() > MAX_PFP_BYTES {

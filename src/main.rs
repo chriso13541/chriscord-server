@@ -79,7 +79,7 @@ async fn main() {
         .route("/api/admin/bans/:public_key", delete(admin::unban))
         .route("/api/server/banner",    get(admin::serve_banner))
         .route("/api/admin/icon",       post(admin::upload_icon).delete(admin::delete_icon)
-            .layer(DefaultBodyLimit::max(3 << 20)))
+            .layer(DefaultBodyLimit::max(9 << 20)))
         .route("/api/server/icon",      get(admin::serve_icon))
         .route("/api/admin/theme",      get(admin::get_theme).post(admin::set_theme))
         .route("/api/admin/theme/background", post(admin::upload_theme_bg).delete(admin::delete_theme_bg)

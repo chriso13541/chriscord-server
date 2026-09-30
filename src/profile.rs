@@ -64,8 +64,8 @@ pub fn save_cached(username: &str, bio: &str, banner: Option<&[u8]>, updated_at:
         return Err(bad("bio too long"));
     }
     if let Some(bytes) = banner {
-        if !matches!(image_mime(bytes), Some("image/png") | Some("image/jpeg")) {
-            return Err(bad("banner is not a PNG or JPEG image"));
+        if !crate::pfp::is_profile_image(bytes) {
+            return Err(bad("banner is not a supported image (PNG, JPEG, GIF, WebP, BMP or AVIF)"));
         }
         if bytes.len() > MAX_PFP_BYTES {
             return Err(bad("banner too large"));

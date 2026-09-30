@@ -369,8 +369,8 @@ pub async fn upload_banner(
     if body.len() > BANNER_MAX_BYTES {
         return Err(bad("Banner must be 8 MB or smaller"));
     }
-    if !matches!(crate::pfp::image_mime(&body), Some("image/png") | Some("image/jpeg")) {
-        return Err(bad("Banner must be a PNG or JPEG image"));
+    if !crate::pfp::is_profile_image(&body) {
+        return Err(bad("Banner must be a PNG, JPEG, GIF, WebP, BMP or AVIF image"));
     }
     tokio::fs::write(banner_path(), &body).await.map_err(|_| bad("Could not save the banner"))?;
     let now = chrono::Utc::now().timestamp_millis();
@@ -419,7 +419,9 @@ pub async fn serve_banner(
 // 256×256 before uploading, so it's small; it's public (like /api/info),
 // because the server list shows it before you've joined.
 
-const ICON_MAX_BYTES: usize = 2 << 20;
+// Static icons arrive as a small 256×256 crop; animated ones are uploaded
+// as-is (cropping would flatten them), so allow room for a GIF.
+const ICON_MAX_BYTES: usize = 8 << 20;
 fn icon_path() -> std::path::PathBuf { server_assets_dir().join("icon") }
 
 /// POST /api/admin/icon — raw PNG/JPEG bytes as the request body.
@@ -430,10 +432,10 @@ pub async fn upload_icon(
 ) -> Result<Json<serde_json::Value>, ApiErr> {
     check_owner(&headers, &s)?;
     if body.len() > ICON_MAX_BYTES {
-        return Err(bad("Server icon must be 2 MB or smaller"));
+        return Err(bad("Server icon must be 8 MB or smaller"));
     }
-    if !matches!(crate::pfp::image_mime(&body), Some("image/png") | Some("image/jpeg")) {
-        return Err(bad("Server icon must be a PNG or JPEG image"));
+    if !crate::pfp::is_profile_image(&body) {
+        return Err(bad("Server icon must be a PNG, JPEG, GIF, WebP, BMP or AVIF image"));
     }
     tokio::fs::write(icon_path(), &body).await.map_err(|_| bad("Could not save the icon"))?;
     let now = chrono::Utc::now().timestamp_millis();
