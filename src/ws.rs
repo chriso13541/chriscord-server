@@ -13,7 +13,21 @@ use std::sync::Arc;
 use crate::{db, messages::{row_to_msg, Attachment, HISTORY_PAGE}, state::AppState, voice};
 
 #[derive(Deserialize)]
-pub struct WsQuery { pub token: String }
+pub struct WsQuery {
+    pub token: String,
+    /// Presence to connect with, so someone who's invisible never flashes
+    /// online for the moment before their first set_status arrives.
+    #[serde(default)]
+    pub status: Option<String>,
+}
+
+/// The presence values a client may choose.
+fn valid_status(s: &str) -> bool { matches!(s, "online" | "idle" | "invisible") }
+
+/// Whether someone shows as offline to others despite being connected.
+fn is_invisible(state: &AppState, username: &str) -> bool {
+    state.presence.lock().unwrap().get(username).map(String::as_str) == Some("invisible")
+}
 
 #[derive(Deserialize)]
 struct ClientMsg {
@@ -36,6 +50,10 @@ struct ClientMsg {
     bio:             Option<String>,
     /// Base64 banner image; absent or empty means "no banner".
     banner_data:     Option<String>,
+    /// set_status: "online" | "idle" | "invisible"
+    status:          Option<String>,
+    /// typing: whether they're typing right now
+    typing:          Option<bool>,
 }
 
 pub async fn ws_handler(
@@ -43,14 +61,17 @@ pub async fn ws_handler(
     Query(query): Query<WsQuery>,
     State(state): State<Arc<AppState>>,
 ) -> impl IntoResponse {
-    ws.on_upgrade(move |socket| handle_socket(socket, query.token, state))
+    ws.on_upgrade(move |socket| handle_socket(socket, query.token, query.status, state))
 }
 
-async fn handle_socket(socket: WebSocket, token: String, state: Arc<AppState>) {
+async fn handle_socket(socket: WebSocket, token: String, initial_status: Option<String>, state: Arc<AppState>) {
     let username = match db::verify_token(&state.pool, &token).await {
         Ok(Some(u)) => u,
         _ => return,
     };
+    if let Some(st) = initial_status.filter(|s| valid_status(s)) {
+        state.presence.lock().unwrap().insert(username.clone(), st);
+    }
 
     { let mut o = state.online.lock().unwrap(); *o.entry(username.clone()).or_insert(0) += 1; }
     let mut rx = state.tx.subscribe();
@@ -235,6 +256,24 @@ async fn handle_socket(socket: WebSocket, token: String, state: Arc<AppState>) {
                                     }
                                 }
                             }
+                            // Presence: Online / Away (manual or automatic) / Invisible.
+                            "set_status" => {
+                                if let Some(st) = cm.status.filter(|s| valid_status(s)) {
+                                    let changed = state.presence.lock().unwrap().insert(username.clone(), st.clone()) != Some(st);
+                                    if changed { broadcast_users(&state); }
+                                }
+                            }
+                            // Typing indicator. Never sent for invisible users —
+                            // typing would give away that they're actually on.
+                            // Clients drop a stale "typing" on their own after
+                            // 10 s, so a lost stop message can't leave it stuck.
+                            "typing" => {
+                                if !is_invisible(&state, &username) {
+                                    let _ = state.tx.send(serde_json::json!({
+                                        "type": "typing", "username": username, "typing": cm.typing.unwrap_or(false),
+                                    }).to_string());
+                                }
+                            }
                             // Profile (bio + banner) sync — same handshake as the pfp above.
                             "profile_info" => {
                                 if let Some(updated_at) = cm.profile_updated_at {
@@ -278,6 +317,7 @@ async fn handle_socket(socket: WebSocket, token: String, state: Arc<AppState>) {
                         if let Ok(v) = serde_json::from_str::<serde_json::Value>(&bcast) {
                             let fwd = match v["type"].as_str() {
                                 Some("users") => true,
+                                Some("typing") => v["username"].as_str() != Some(username.as_str()),
                                 Some("rooms_updated") => true,
                                 Some("voice_state") => true,
                                 // Speaking rings are only for people in that same call —
@@ -310,7 +350,12 @@ async fn handle_socket(socket: WebSocket, token: String, state: Arc<AppState>) {
     {
         let mut o = state.online.lock().unwrap();
         let c = o.entry(username.clone()).or_insert(0);
-        if *c <= 1 { o.remove(&username); } else { *c -= 1; }
+        if *c <= 1 {
+            o.remove(&username);
+            state.presence.lock().unwrap().remove(&username);
+            // Stop any typing indicator left showing for them.
+            let _ = state.tx.send(serde_json::json!({ "type": "typing", "username": username, "typing": false }).to_string());
+        } else { *c -= 1; }
     }
     broadcast_users(&state);
 
@@ -350,12 +395,27 @@ fn broadcast_voice_state(state: &Arc<AppState>) {
     let _ = state.tx.send(serde_json::json!({ "type": "voice_state", "channels": channels }).to_string());
 }
 
+/// Sends everyone the member list: who's online (invisible people are
+/// left out, so they look offline) and each online person's status
+/// ("online" or "idle").
 fn broadcast_users(state: &Arc<AppState>) {
-    let online: Vec<String> = { state.online.lock().unwrap().keys().cloned().collect() };
+    let (online, statuses) = {
+        let o = state.online.lock().unwrap();
+        let p = state.presence.lock().unwrap();
+        let mut online = Vec::new();
+        let mut statuses = serde_json::Map::new();
+        for user in o.keys() {
+            let st = p.get(user).map(String::as_str).unwrap_or("online");
+            if st == "invisible" { continue; }
+            online.push(user.clone());
+            statuses.insert(user.clone(), serde_json::Value::String(st.to_string()));
+        }
+        (online, statuses)
+    };
     let state = Arc::clone(state);
     tokio::spawn(async move {
         let all = crate::db::all_known_users(&state.pool).await.unwrap_or_default();
-        let _ = state.tx.send(serde_json::json!({ "type": "users", "online": online, "all": all }).to_string());
+        let _ = state.tx.send(serde_json::json!({ "type": "users", "online": online, "statuses": statuses, "all": all }).to_string());
     });
 }
 

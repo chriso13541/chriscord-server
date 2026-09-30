@@ -10,6 +10,11 @@ pub struct AppState {
     pub tx:        broadcast::Sender<String>,
     /// username → connection count for presence tracking
     pub online: Mutex<HashMap<String, usize>>,
+    /// username → chosen presence while connected: "online", "idle" (away,
+    /// manual or automatic) or "invisible" (connected but shown offline to
+    /// everyone else). Absent = "online". Cleared when their last
+    /// connection closes.
+    pub presence: Mutex<HashMap<String, String>>,
     /// nonce_hex → (issued_at, public_key_hex)
     /// Challenges expire after 60 seconds.
     pub challenges: Mutex<HashMap<String, (Instant, String)>>,
