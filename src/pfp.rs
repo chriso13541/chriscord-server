@@ -53,7 +53,7 @@ pub fn pfps_dir() -> PathBuf {
 /// a malformed value reaching this file directly — no path separators, no
 /// leading dot (which could otherwise reach a dotfile or, with "..",
 /// escape the directory entirely).
-fn sanitize_username(username: &str) -> Option<String> {
+pub fn sanitize_username(username: &str) -> Option<String> {
     if username.is_empty()
         || username.contains('/')
         || username.contains('\\')

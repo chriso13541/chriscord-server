@@ -32,6 +32,10 @@ struct ClientMsg {
     deafened:        Option<bool>,
     pfp_updated_at:  Option<i64>,
     pfp_data:        Option<String>,
+    profile_updated_at: Option<i64>,
+    bio:             Option<String>,
+    /// Base64 banner image; absent or empty means "no banner".
+    banner_data:     Option<String>,
 }
 
 pub async fn ws_handler(
@@ -231,6 +235,35 @@ async fn handle_socket(socket: WebSocket, token: String, state: Arc<AppState>) {
                                     }
                                 }
                             }
+                            // Profile (bio + banner) sync — same handshake as the pfp above.
+                            "profile_info" => {
+                                if let Some(updated_at) = cm.profile_updated_at {
+                                    if updated_at > 0 && crate::profile::cached_timestamp(&username) != Some(updated_at) {
+                                        send_to_user(&state, &username, serde_json::json!({ "type": "profile_request" }));
+                                    }
+                                }
+                            }
+                            "profile_upload" => {
+                                if let Some(updated_at) = cm.profile_updated_at {
+                                    use base64::Engine as _;
+                                    let banner = match cm.banner_data.as_deref() {
+                                        Some(b) if !b.is_empty() => match base64::engine::general_purpose::STANDARD.decode(b) {
+                                            Ok(bytes) => Some(bytes),
+                                            Err(_) => { tracing::warn!("profile: invalid base64 banner from {username}"); None }
+                                        },
+                                        _ => None,
+                                    };
+                                    let bio = cm.bio.unwrap_or_default();
+                                    match crate::profile::save_cached(&username, &bio, banner.as_deref(), updated_at) {
+                                        Ok(()) => {
+                                            let _ = state.tx.send(serde_json::json!({
+                                                "type": "profile_updated", "username": username, "updated_at": updated_at,
+                                            }).to_string());
+                                        }
+                                        Err(e) => tracing::warn!("profile: rejected profile from {username}: {e}"),
+                                    }
+                                }
+                            }
                             _ => {}
                         }
                     }
@@ -255,12 +288,12 @@ async fn handle_socket(socket: WebSocket, token: String, state: Arc<AppState>) {
                                     my_board.as_deref().is_some() && v["board_id"].as_str() == my_board.as_deref()
                                 }
                                 Some("voice_mute_state") => true,
-                                Some("pfp_updated") => true,
+                                Some("pfp_updated") | Some("profile_updated") => true,
                                 Some("message") => true,
                                 Some("message_edit") | Some("message_delete") | Some("message_pin") => subscribed_board.as_deref()
                                     .map(|bid| v["board_id"].as_str() == Some(bid))
                                     .unwrap_or(false),
-                                Some("voice_answer") | Some("voice_ice") | Some("voice_status_snapshot") | Some("voice_renegotiate") | Some("pfp_request") =>
+                                Some("voice_answer") | Some("voice_ice") | Some("voice_status_snapshot") | Some("voice_renegotiate") | Some("pfp_request") | Some("profile_request") =>
                                     v["target"].as_str() == Some(username.as_str()),
                                 _ => false,
                             };

@@ -4,6 +4,7 @@ mod db;
 mod files;
 mod messages;
 mod pfp;
+mod profile;
 mod preview;
 mod rooms;
 mod state;
@@ -86,6 +87,8 @@ async fn main() {
         .route("/api/files/:filename",  get(files::serve_file))
         .route("/api/files/:filename/link", get(files::file_link))
         .route("/api/pfp/:username",    get(pfp::serve_pfp))
+        .route("/api/profile/:username", get(profile::get_profile))
+        .route("/api/banner/:username",  get(profile::serve_banner))
         .route("/api/preview",          get(preview::get_preview))
         .route("/ws",                   get(ws::ws_handler))
         .layer(CorsLayer::permissive())
