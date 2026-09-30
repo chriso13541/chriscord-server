@@ -54,7 +54,6 @@ use webrtc::ice::network_type::NetworkType;
 use webrtc::ice::udp_mux::{UDPMuxDefault, UDPMuxParams};
 use webrtc::ice::udp_network::UDPNetwork;
 use webrtc::ice_transport::ice_candidate::{RTCIceCandidate, RTCIceCandidateInit};
-use webrtc::ice_transport::ice_candidate_type::RTCIceCandidateType;
 use webrtc::ice_transport::ice_server::RTCIceServer;
 use webrtc::interceptor::registry::Registry;
 use webrtc::peer_connection::configuration::RTCConfiguration;
@@ -96,14 +95,58 @@ type ParticipantKey = (String, String);
 /// exact IP (CHRISCORD_ICE_IP via set_ip_filter). With one candidate there
 /// is one reader, and nothing to misroute.
 ///
-/// Note that muxed mode skips STUN (server-reflexive) gathering entirely
-/// (agent_gather.rs), so for clients outside the LAN the server's public
-/// IP must be advertised explicitly via CHRISCORD_PUBLIC_IP
-/// (set_nat_1to1_ips). LAN clients still connect: the server's own
-/// connectivity checks to their LAN host candidate let them learn the
-/// server's LAN address as a peer-reflexive candidate (and router NAT
-/// loopback covers it otherwise).
+/// Loopback is always excluded too: 127.0.0.1 is IPv4, so Udp4-only
+/// doesn't stop it, and it's a second candidate (second reader) on the
+/// same socket that no client can ever reach anyway.
+///
+/// Reaching the server from outside the LAN: muxed mode skips STUN
+/// (server-reflexive) gathering entirely, and in webrtc-ice 0.11 that
+/// includes the nat_1to1 "srflx" mapping (agent_gather.rs), so the only
+/// built-in option is nat_1to1 "host", which REPLACES the LAN address with
+/// the public one — LAN clients then depend on router NAT loopback. So
+/// instead, when CHRISCORD_PUBLIC_IP is set, every private-address host
+/// candidate is sent to the client twice: once as-is (LAN clients use it)
+/// and once with the public IP swapped in (see public_candidate_copy).
+/// Checks a remote client sends to publicIP:7070 are port-forwarded to
+/// this socket, routed to the right connection by ICE ufrag, and answered
+/// from the same socket — so the router's port-forward mapping carries
+/// the replies back out. Without CHRISCORD_PUBLIC_IP, only LAN clients can
+/// connect: a remote client is only ever told the private LAN address.
 const ICE_UDP_PORT: u16 = 7070;
+
+/// The server's public IPv4 address, from CHRISCORD_PUBLIC_IP (read once).
+fn public_ip() -> Option<&'static str> {
+    static PUBLIC_IP: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    PUBLIC_IP
+        .get_or_init(|| {
+            std::env::var("CHRISCORD_PUBLIC_IP").ok()
+                .map(|v| v.trim().to_string())
+                .filter(|v| v.parse::<std::net::Ipv4Addr>().is_ok())
+        })
+        .as_deref()
+}
+
+/// Given one of this server's ICE candidate lines, returns a copy
+/// advertising `public_ip` in place of a private (RFC 1918) host address —
+/// same port, a distinct foundation, and a slightly lower priority so a
+/// client that can reach the LAN address still prefers it. Anything that
+/// isn't a private IPv4 host candidate is left alone (None).
+fn public_candidate_copy(candidate: &str, public_ip: &str) -> Option<String> {
+    let mut parts: Vec<String> = candidate.split_whitespace().map(str::to_string).collect();
+    // candidate:<foundation> <component> <transport> <priority> <address> <port> typ <type> ...
+    if parts.len() < 8 || parts[6] != "typ" || parts[7] != "host" {
+        return None;
+    }
+    let addr: std::net::Ipv4Addr = parts[4].parse().ok()?;
+    if !addr.is_private() || parts[4] == public_ip {
+        return None;
+    }
+    let priority: u32 = parts[3].parse().ok()?;
+    parts[0] = format!("{}p", parts[0]);
+    parts[3] = priority.saturating_sub(1).to_string();
+    parts[4] = public_ip.to_string();
+    Some(parts.join(" "))
+}
 
 pub struct VoiceRuntime {
     api: API,
@@ -167,26 +210,29 @@ impl VoiceRuntime {
         // interface from adding extra candidates (and extra readers) on the
         // shared socket. See ICE_UDP_PORT's comment.
         setting_engine.set_network_types(vec![NetworkType::Udp4]);
-        // Optionally pin the single exact IP to gather from, e.g.
-        // CHRISCORD_ICE_IP=192.168.1.50 — useful if the chosen interface
-        // has more than one IPv4 address.
-        if let Ok(ip) = std::env::var("CHRISCORD_ICE_IP") {
-            let wanted: std::net::IpAddr = ip
-                .trim()
-                .parse()
-                .expect("CHRISCORD_ICE_IP must be a valid IP address");
-            tracing::info!("voice: CHRISCORD_ICE_IP set — only gathering from {wanted}");
-            setting_engine.set_ip_filter(Box::new(move |addr: std::net::IpAddr| addr == wanted));
+        // Never gather loopback (see ICE_UDP_PORT). Optionally pin the
+        // single exact IP to gather from, e.g. CHRISCORD_ICE_IP=192.168.1.50
+        // — useful if the chosen interface has more than one IPv4 address.
+        let wanted: Option<std::net::IpAddr> = std::env::var("CHRISCORD_ICE_IP").ok().map(|ip| {
+            ip.trim().parse().expect("CHRISCORD_ICE_IP must be a valid IP address")
+        });
+        if let Some(w) = wanted {
+            tracing::info!("voice: CHRISCORD_ICE_IP set — only gathering from {w}");
         }
-        // Advertise the public IP for clients outside the LAN (muxed mode
-        // does no STUN gathering). e.g. CHRISCORD_PUBLIC_IP=203.0.113.7
-        match std::env::var("CHRISCORD_PUBLIC_IP") {
-            Ok(public_ip) if !public_ip.trim().is_empty() => {
-                tracing::info!("voice: advertising public IP {} for voice", public_ip.trim());
-                setting_engine.set_nat_1to1_ips(vec![public_ip.trim().to_string()], RTCIceCandidateType::Host);
-            }
-            _ => tracing::info!(
-                "voice: CHRISCORD_PUBLIC_IP not set — only LAN clients will be able to connect to voice"
+        setting_engine.set_ip_filter(Box::new(move |addr: std::net::IpAddr| {
+            !addr.is_loopback() && wanted.map_or(true, |w| addr == w)
+        }));
+        // Clients outside the LAN get the public IP as an extra candidate
+        // (see ICE_UDP_PORT). e.g. CHRISCORD_PUBLIC_IP=203.0.113.7
+        match (public_ip(), std::env::var("CHRISCORD_PUBLIC_IP")) {
+            (Some(ip), _) => tracing::info!(
+                "voice: CHRISCORD_PUBLIC_IP={ip} — advertising it alongside the LAN address (forward UDP {ICE_UDP_PORT} to this machine)"
+            ),
+            (None, Ok(bad)) if !bad.trim().is_empty() => tracing::warn!(
+                "voice: CHRISCORD_PUBLIC_IP={bad:?} is not an IPv4 address — ignoring it; only LAN clients can connect to voice"
+            ),
+            _ => tracing::warn!(
+                "voice: CHRISCORD_PUBLIC_IP not set — only LAN clients can connect to voice"
             ),
         }
         // Filters which network interfaces ICE gathers candidates from —
@@ -399,16 +445,21 @@ pub async fn handle_offer(
                     return;
                 }
             };
-            crate::ws::send_to_user(
-                &state_for_ice,
-                &username_for_ice,
-                serde_json::json!({
-                    "type": "voice_ice",
-                    "candidate": init.candidate,
-                    "sdp_mid": init.sdp_mid,
-                    "sdp_mline_index": init.sdp_mline_index,
-                }),
-            );
+            // The public-IP twin of a LAN candidate, for clients outside the
+            // LAN (see ICE_UDP_PORT) — sent right after the original.
+            let public_copy = public_ip().and_then(|ip| public_candidate_copy(&init.candidate, ip));
+            for candidate in std::iter::once(init.candidate.clone()).chain(public_copy) {
+                crate::ws::send_to_user(
+                    &state_for_ice,
+                    &username_for_ice,
+                    serde_json::json!({
+                        "type": "voice_ice",
+                        "candidate": candidate,
+                        "sdp_mid": init.sdp_mid,
+                        "sdp_mline_index": init.sdp_mline_index,
+                    }),
+                );
+            }
         })
     }));
 
