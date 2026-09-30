@@ -103,6 +103,43 @@
   #modal .box { background:var(--surface); border:1px solid var(--border); border-radius:10px; padding:22px; width:100%; max-width:440px; }
   #modal h3 { color:var(--strong); margin-bottom:6px; }
   #modal .row { justify-content:flex-end; margin-top:18px; }
+  /* theme editor + app preview (uses the app's own variable names) */
+  .th-wrap { display:flex; gap:28px; align-items:flex-start; flex-wrap:wrap; }
+  .th-fields { flex:1; min-width:280px; max-width:420px; }
+  .th-swatches { display:flex; gap:8px; flex-wrap:wrap; margin-bottom:10px; }
+  .th-swatch { width:32px; height:32px; border-radius:50%; border:2px solid var(--border); padding:0; position:relative; }
+  .th-swatch.on { border-color:#fff; box-shadow:0 0 0 2px var(--accent); }
+  .th-swatch span { position:absolute; inset:0; display:flex; align-items:center; justify-content:center; font-size:.58rem; font-weight:700; }
+  .th-color { display:flex; align-items:center; gap:10px; }
+  .th-color input[type=color] { width:44px; height:32px; padding:0; border:1px solid var(--border); border-radius:6px; background:none; cursor:pointer; }
+  .th-color code { min-width:70px; }
+  .th-slider { display:flex; align-items:center; gap:12px; } .th-slider input { flex:1; accent-color:var(--accent); } .th-slider span { width:42px; text-align:right; }
+  #th-img-controls.off { opacity:.45; pointer-events:none; }
+  .th-defaults { display:grid; grid-template-columns:auto 1fr; gap:4px 12px; font-size:.8rem; }
+  .th-defaults i { width:13px; height:13px; border-radius:3px; display:inline-block; vertical-align:middle; margin-right:6px; border:1px solid rgba(255,255,255,.2); }
+  .ap-preview { --bg-darkest:#0e1117; --bg-dark:#1a1d27; --bg-mid:#20232f; --bg-light:#2a2d3e; --border:#2e3248; --accent:#7289da; --text:#dcddde; --text-muted:#72767d; --text-strong:#fff;
+    position:relative; width:460px; max-width:100%; height:290px; border-radius:10px; overflow:hidden; border:1px solid var(--border); background:var(--bg-darkest); color:var(--text); font-size:.72rem; isolation:isolate; }
+  .ap-preview .bg-img { position:absolute; background-size:cover; background-position:center; z-index:0; }
+  .ap-preview .bg-dim { position:absolute; inset:0; z-index:0; }
+  .ap-app { position:relative; z-index:1; display:flex; height:100%; }
+  .ap-side, .ap-members { background:var(--bg-dark); display:flex; flex-direction:column; gap:2px; padding:8px 6px; }
+  .ap-side { width:118px; border-right:1px solid var(--border); } .ap-members { width:92px; border-left:1px solid var(--border); }
+  .ap-preview.img .ap-side, .ap-preview.img .ap-members { background:var(--pane-bg); }
+  .ap-chat { flex:1; display:flex; flex-direction:column; min-width:0; background:var(--bg-darkest); }
+  .ap-preview.img .ap-chat { background:var(--chat-bg); }
+  .ap-server { font-weight:800; color:var(--text-strong); padding:2px 4px 8px; border-bottom:1px solid var(--border); margin-bottom:4px; }
+  .ap-cat { font-size:.6rem; font-weight:800; color:var(--text-muted); padding:6px 4px 2px; }
+  .ap-chan { padding:3px 6px; border-radius:4px; color:var(--text-muted); } .ap-chan.active { background:var(--bg-light); color:var(--text-strong); }
+  .ap-me { margin-top:auto; display:flex; align-items:center; gap:6px; padding:6px 4px 0; border-top:1px solid var(--border); color:var(--text-strong); font-weight:700; }
+  .ap-head { padding:8px 10px; border-bottom:1px solid var(--border); font-weight:800; color:var(--text-strong); }
+  .ap-msgs { flex:1; padding:8px 10px; display:flex; flex-direction:column; gap:10px; }
+  .ap-msg { display:flex; gap:8px; } .ap-msg b { color:var(--text-strong); } .ap-msg i { color:var(--text-muted); font-style:normal; font-size:.6rem; }
+  .ap-link { color:var(--accent); text-decoration:underline; }
+  .ap-react { display:inline-block; margin-top:4px; padding:1px 6px; border-radius:6px; border:1px solid var(--accent); background:var(--bg-light); color:var(--text-strong); }
+  .ap-input { margin:0 10px 10px; padding:8px 10px; border-radius:6px; background:var(--bg-mid); color:var(--text-muted); }
+  .ap-mem { display:flex; align-items:center; gap:6px; padding:3px 4px; }
+  .ap-av { width:18px; height:18px; border-radius:50%; display:inline-flex; align-items:center; justify-content:center; color:#fff; font-weight:700; font-size:.6rem; flex-shrink:0; }
+  #th-sample { margin-top:10px; pointer-events:none; }
   /* image cropper (icon + banner) — same drag + zoom as the app's pfp cropper */
   #cropper { position:fixed; inset:0; background:rgba(0,0,0,.65); display:none; align-items:center; justify-content:center; padding:20px; z-index:15; }
   #cropper.on { display:flex; }
@@ -124,6 +161,7 @@
 <body>
 <!-- Icons: Google Material Symbols, Apache 2.0 — see THIRD_PARTY_NOTICES.txt -->
 <svg xmlns="http://www.w3.org/2000/svg" style="display:none">
+<symbol id="i-format_paint" viewBox="0 -960 960 960"><path d="M440-80q-33 0-56.5-23.5T360-160v-160H240q-33 0-56.5-23.5T160-400v-280q0-66 47-113t113-47h480v440q0 33-23.5 56.5T720-320H600v160q0 33-23.5 56.5T520-80h-80ZM240-560h480v-200h-40v160h-80v-160h-40v80h-80v-80H320q-33 0-56.5 23.5T240-680v120Zm0 160h480v-80H240v80Zm0 0v-80 80Z"/></symbol>
 <symbol id="i-dashboard" viewBox="0 -960 960 960"><path d="M520-600v-240h320v240H520ZM120-440v-400h320v400H120Zm400 320v-400h320v400H520Zm-400 0v-240h320v240H120Zm80-400h160v-240H200v240Zm400 320h160v-240H600v240Zm0-480h160v-80H600v80ZM200-200h160v-80H200v80Zm160-320Zm240-160Zm0 240ZM360-280Z"/></symbol>
 <symbol id="i-palette" viewBox="0 -960 960 960"><path d="M480-80q-82 0-155-31.5t-127.5-86Q143-252 111.5-325T80-480q0-83 32.5-156t88-127Q256-817 330-848.5T488-880q80 0 151 27.5t124.5 76q53.5 48.5 85 115T880-518q0 115-70 176.5T640-280h-74q-9 0-12.5 5t-3.5 11q0 12 15 34.5t15 51.5q0 50-27.5 74T480-80Zm0-400Zm-220 40q26 0 43-17t17-43q0-26-17-43t-43-17q-26 0-43 17t-17 43q0 26 17 43t43 17Zm120-160q26 0 43-17t17-43q0-26-17-43t-43-17q-26 0-43 17t-17 43q0 26 17 43t43 17Zm200 0q26 0 43-17t17-43q0-26-17-43t-43-17q-26 0-43 17t-17 43q0 26 17 43t43 17Zm120 160q26 0 43-17t17-43q0-26-17-43t-43-17q-26 0-43 17t-17 43q0 26 17 43t43 17ZM480-160q9 0 14.5-5t5.5-13q0-14-15-33t-15-57q0-42 29-67t71-25h70q66 0 113-38.5T800-518q0-121-92.5-201.5T488-800q-136 0-232 93t-96 227q0 133 93.5 226.5T480-160Z"/></symbol>
 <symbol id="i-upload" viewBox="0 -960 960 960"><path d="M440-320v-326L336-542l-56-58 200-200 200 200-56 58-104-104v326h-80ZM240-160q-33 0-56.5-23.5T160-240v-120h80v120h480v-120h80v120q0 33-23.5 56.5T720-160H240Z"/></symbol>
@@ -165,6 +203,7 @@
     <div class="srv" id="nav-server-name">Server</div>
     <a data-sec="overview" class="on"><svg class="ic"><use href="#i-dashboard"/></svg>Overview</a>
     <a data-sec="custom"><svg class="ic"><use href="#i-palette"/></svg>Customization</a>
+    <a data-sec="theme"><svg class="ic"><use href="#i-format_paint"/></svg>Theme</a>
     <a data-sec="uploads"><svg class="ic"><use href="#i-upload"/></svg>Uploads</a>
     <a data-sec="channels"><svg class="ic"><use href="#i-tag"/></svg>Channels</a>
     <a data-sec="members"><svg class="ic"><use href="#i-group"/></svg>Members</a>
@@ -227,6 +266,54 @@
           <button id="banner-choose"><svg class="ic"><use href="#i-image"/></svg>Upload banner</button>
           <button class="ghost" id="banner-remove">Remove</button><span class="msg" id="banner-msg"></span></div>
       </div>
+    </section>
+
+    <!-- Theme -->
+    <section id="sec-theme">
+      <h2>Theme</h2><p class="sub">The server's own look — members see it while they're connected, unless they've chosen to use
+        their own theme in the app (Settings → Appearance).</p>
+      <div class="card"><div class="th-wrap">
+        <div class="th-fields">
+          <label class="f" style="margin-top:0">Theme color</label>
+          <div class="th-swatches" id="th-swatches"></div>
+          <div class="th-color"><input type="color" id="th-base"><code id="th-base-val">Default</code><button class="ghost small" id="th-base-reset">Reset</button></div>
+          <p class="hint">Panels, backgrounds and borders are all worked out from this one color. A light color gives a light theme.</p>
+          <label class="f">Accent color</label>
+          <div class="th-color"><input type="color" id="th-accent"><code id="th-accent-val">Default</code><button class="ghost small" id="th-accent-reset">Reset</button></div>
+          <label class="f">Background image</label>
+          <div class="row">
+            <input type="file" id="th-file" accept="image/png,image/jpeg,image/webp" hidden>
+            <button class="ghost" id="th-img-choose"><svg class="ic"><use href="#i-image"/></svg>Choose image</button><button class="ghost" id="th-img-remove">Remove</button></div>
+          <div id="th-img-controls">
+            <label class="f" for="th-blur">Blur</label><div class="th-slider"><input type="range" id="th-blur" min="0" max="100"><span id="th-blur-val">0%</span></div>
+            <label class="f" for="th-dim">Darken</label><div class="th-slider"><input type="range" id="th-dim" min="0" max="90"><span id="th-dim-val">0%</span></div>
+          </div>
+          <div class="row" style="margin-top:18px">
+            <button id="th-save" disabled>Save</button><button class="ghost" id="th-revert" disabled>Revert</button>
+            <button class="ghost" id="th-default">Reset to default</button><span class="msg" id="th-msg"></span></div>
+          <label class="f">Default colors, for reference</label>
+          <div class="th-defaults" id="th-defaults"></div>
+        </div>
+        <div>
+          <label class="f" style="margin-top:0">Preview</label>
+          <div class="ap-preview" id="th-preview">
+            <div class="bg-img"></div><div class="bg-dim"></div>
+            <div class="ap-app">
+              <div class="ap-side"><div class="ap-server" id="th-prev-name">Server</div><div class="ap-cat">TEXT</div>
+                <div class="ap-chan active"># general</div><div class="ap-chan"># memes</div><div class="ap-cat">VOICE</div><div class="ap-chan">Hangout</div>
+                <div class="ap-me"><span class="ap-av" style="background:#5865f2">Y</span>you</div></div>
+              <div class="ap-chat"><div class="ap-head"># general</div>
+                <div class="ap-msgs">
+                  <div class="ap-msg"><span class="ap-av" style="background:#e67e22">A</span><div><b>alex</b> <i>Today</i><div>anyone on tonight?</div></div></div>
+                  <div class="ap-msg"><span class="ap-av" style="background:#1abc9c">S</span><div><b>sam</b> <i>Today</i><div>yeah, hop in <span class="ap-link">voice</span></div><span class="ap-react">+1 2</span></div></div>
+                </div><div class="ap-input">Message #general</div></div>
+              <div class="ap-members"><div class="ap-cat">ONLINE — 2</div>
+                <div class="ap-mem"><span class="ap-av" style="background:#e67e22">A</span>alex</div><div class="ap-mem"><span class="ap-av" style="background:#1abc9c">S</span>sam</div></div>
+            </div>
+          </div>
+          <button id="th-sample">Sample button</button>
+        </div>
+      </div></div>
     </section>
 
     <!-- Uploads -->
@@ -342,7 +429,7 @@ document.querySelectorAll('nav a[data-sec]').forEach(a => a.onclick = () => {
 let info = {};
 async function loadAll() {
   await loadInfo();
-  await Promise.all([loadRooms(), loadMembers(), loadBans()]);
+  await Promise.all([loadRooms(), loadMembers(), loadBans(), loadTheme()]);
 }
 async function loadInfo() {
   info = await api('/api/admin/info');
@@ -497,6 +584,97 @@ $('icon-file').onchange = async () => {
 $('icon-remove').onclick = async () => {
   try { await api('/api/admin/icon', { method: 'DELETE' }); info.icon_updated_at = 0; await showIcon(); flash('icon-msg', 'Icon removed'); }
   catch (e) { flash('icon-msg', e.message, false); }
+};
+
+// ── Theme ────────────────────────────────────────────────────────────
+// Same theme model as the app's Settings → Appearance (kept in step with
+// themeVars() in the client's index.html), so the preview here is what
+// members will see.
+const DEFAULT_THEME = { '--bg-darkest':'#0e1117', '--bg-dark':'#1a1d27', '--bg-mid':'#20232f', '--bg-light':'#2a2d3e', '--border':'#2e3248',
+  '--accent':'#7289da', '--accent-dim':'#4e5d94', '--text':'#dcddde', '--text-muted':'#72767d', '--text-strong':'#ffffff' };
+const DEFAULT_LABELS = [['--bg-darkest','Chat background'],['--bg-dark','Panels'],['--bg-mid','Inputs, popups'],['--bg-light','Hover, selected'],['--border','Borders'],['--accent','Accent'],['--text','Text']];
+const PRESETS = [['Default',null],['Midnight','#152238'],['Forest','#16261d'],['Plum','#2a1a2e'],['Ember','#2b1a17'],['Charcoal','#1e1e1e'],['Light','#f2f3f5']];
+function hexToHsl(hex){const n=parseInt(hex.slice(1),16),r=(n>>16&255)/255,g=(n>>8&255)/255,b=(n&255)/255;const mx=Math.max(r,g,b),mn=Math.min(r,g,b),l=(mx+mn)/2;let h=0,s=0;
+  if(mx!==mn){const d=mx-mn;s=l>.5?d/(2-mx-mn):d/(mx+mn);h=mx===r?(g-b)/d+(g<b?6:0):mx===g?(b-r)/d+2:(r-g)/d+4;h*=60;}return [h,s,l];}
+function hsl(h,s,l){l=Math.max(0,Math.min(1,l));const a=s*Math.min(l,1-l),f=k=>{const x=(k+h/30)%12;return Math.round(255*(l-a*Math.max(-1,Math.min(x-3,9-x,1)))).toString(16).padStart(2,'0');};return '#'+f(0)+f(8)+f(4);}
+function hexA(hex,a){const n=parseInt(hex.slice(1),16);return `rgba(${n>>16&255},${n>>8&255},${n&255},${a})`;}
+function themeVars(t){
+  const v={...DEFAULT_THEME};
+  if(t.base){const [h,s,l]=hexToHsl(t.base);v['--bg-dark']=t.base;
+    if(l<=0.55)Object.assign(v,{'--bg-darkest':hsl(h,s,Math.max(.02,l-.055)),'--bg-mid':hsl(h,s,l+.022),'--bg-light':hsl(h,s,l+.07),'--border':hsl(h,s,l+.09)});
+    else Object.assign(v,{'--bg-darkest':hsl(h,s,Math.min(.99,l+.035)),'--bg-mid':hsl(h,s,l-.03),'--bg-light':hsl(h,s,l-.075),'--border':hsl(h,s,l-.12),'--text':'#2e3338','--text-muted':'#5c6370','--text-strong':'#060607'});}
+  if(t.accent){const [h,s,l]=hexToHsl(t.accent);v['--accent']=t.accent;v['--accent-dim']=hsl(h,s,l*.68);}
+  v['--pane-bg']=hexA(v['--bg-dark'],.72);v['--chat-bg']=hexA(v['--bg-darkest'],.45);
+  return v;
+}
+let theme = { base:null, accent:null, blur:30, dim:40, bg_updated_at:0 }, thDraft = { ...theme }, thBgURL = '';
+async function loadTheme() {
+  theme = await api('/api/admin/theme'); thDraft = { ...theme };
+  if (thBgURL) { URL.revokeObjectURL(thBgURL); thBgURL = ''; }
+  if (theme.bg_updated_at) {
+    const r = await fetch('/api/server/theme/background', { headers: { 'X-Owner-Key': KEY } });
+    if (r.ok) thBgURL = URL.createObjectURL(await r.blob());
+  }
+  renderTheme();
+}
+function renderTheme() {
+  const d = thDraft, p = $('th-preview'), v = themeVars(d);
+  for (const [k, val] of Object.entries(v)) p.style.setProperty(k, val);
+  $('th-sample').style.background = v['--accent'];
+  const img = p.querySelector('.bg-img'), dim = p.querySelector('.bg-dim'), has = !!(d.bg_updated_at && thBgURL);
+  p.classList.toggle('img', has);
+  if (has) { const px = Math.round(d.blur * 0.3 * 0.35); img.style.inset = `${-px * 2}px`; img.style.backgroundImage = `url("${thBgURL}")`; img.style.filter = px ? `blur(${px}px)` : ''; dim.style.background = `rgba(0,0,0,${d.dim / 100})`; }
+  else { img.style.backgroundImage = ''; dim.style.background = 'transparent'; }
+  $('th-prev-name').textContent = info.server_name || 'Server';
+  $('th-base').value = d.base || DEFAULT_THEME['--bg-dark']; $('th-base-val').textContent = d.base ? d.base.toUpperCase() : 'Default';
+  $('th-accent').value = d.accent || DEFAULT_THEME['--accent']; $('th-accent-val').textContent = d.accent ? d.accent.toUpperCase() : 'Default';
+  document.querySelectorAll('.th-swatch').forEach(b => b.classList.toggle('on', (b.dataset.color || null) === (d.base || null)));
+  $('th-img-controls').classList.toggle('off', !has); $('th-img-remove').disabled = !theme.bg_updated_at;
+  $('th-blur').value = d.blur; $('th-blur-val').textContent = d.blur + '%'; $('th-dim').value = d.dim; $('th-dim-val').textContent = d.dim + '%';
+  const dirty = d.base !== theme.base || d.accent !== theme.accent || d.blur !== theme.blur || d.dim !== theme.dim;
+  $('th-save').disabled = !dirty; $('th-revert').disabled = !dirty;
+}
+$('th-swatches').innerHTML = PRESETS.map(([n, c]) => `<button class="th-swatch" title="${n}" ${c ? `data-color="${c}"` : ''} style="background:${c || DEFAULT_THEME['--bg-dark']};color:#fff">${c ? '' : '<span>DEF</span>'}</button>`).join('');
+document.querySelectorAll('.th-swatch').forEach(b => b.onclick = () => { thDraft.base = b.dataset.color || null; renderTheme(); });
+$('th-defaults').innerHTML = DEFAULT_LABELS.map(([k, l]) => `<span><i style="background:${DEFAULT_THEME[k]}"></i>${l}</span><code>${DEFAULT_THEME[k]}</code>`).join('');
+$('th-base').oninput = e => { thDraft.base = e.target.value; renderTheme(); };
+$('th-accent').oninput = e => { thDraft.accent = e.target.value; renderTheme(); };
+$('th-base-reset').onclick = () => { thDraft.base = null; renderTheme(); };
+$('th-accent-reset').onclick = () => { thDraft.accent = null; renderTheme(); };
+$('th-blur').oninput = e => { thDraft.blur = +e.target.value; renderTheme(); };
+$('th-dim').oninput = e => { thDraft.dim = +e.target.value; renderTheme(); };
+$('th-revert').onclick = () => { thDraft = { ...theme }; renderTheme(); };
+$('th-default').onclick = () => { thDraft = { ...thDraft, base: null, accent: null, blur: 30, dim: 40 }; renderTheme();
+  if (theme.bg_updated_at) flash('th-msg', 'Colors reset — use Remove to drop the background image too', true); };
+$('th-save').onclick = async () => {
+  try { await api('/api/admin/theme', { json: { base: thDraft.base, accent: thDraft.accent, blur: thDraft.blur, dim: thDraft.dim } });
+    theme = { ...theme, base: thDraft.base, accent: thDraft.accent, blur: thDraft.blur, dim: thDraft.dim }; renderTheme(); flash('th-msg', 'Saved'); }
+  catch (e) { flash('th-msg', e.message, false); }
+};
+// Background images are scaled to at most 1920×1080 (JPEG) before upload.
+function shrinkImage(file) {
+  return new Promise((resolve, reject) => {
+    const url = URL.createObjectURL(file), img = new Image();
+    img.onload = () => { const k = Math.min(1, 1920 / img.naturalWidth, 1080 / img.naturalHeight);
+      const c = document.createElement('canvas'); c.width = Math.round(img.naturalWidth * k); c.height = Math.round(img.naturalHeight * k);
+      const ctx = c.getContext('2d'); ctx.imageSmoothingQuality = 'high'; ctx.drawImage(img, 0, 0, c.width, c.height); URL.revokeObjectURL(url);
+      c.toBlob(b => b ? resolve(b) : reject(new Error('Could not process that image')), 'image/jpeg', 0.85); };
+    img.onerror = () => { URL.revokeObjectURL(url); reject(new Error('That file isn\u2019t a readable image')); };
+    img.src = url;
+  });
+}
+$('th-img-choose').onclick = () => $('th-file').click();
+$('th-file').onchange = async () => {
+  const f = $('th-file').files[0]; $('th-file').value = ''; if (!f) return;
+  try { const blob = await shrinkImage(f);
+    const r = await api('/api/admin/theme/background', { method: 'POST', body: blob, headers: { 'Content-Type': 'image/jpeg' } });
+    theme.bg_updated_at = thDraft.bg_updated_at = r.bg_updated_at;
+    if (thBgURL) URL.revokeObjectURL(thBgURL); thBgURL = URL.createObjectURL(blob); renderTheme(); flash('th-msg', 'Background updated'); }
+  catch (e) { flash('th-msg', e.message, false); }
+};
+$('th-img-remove').onclick = async () => {
+  try { await api('/api/admin/theme/background', { method: 'DELETE' }); theme.bg_updated_at = thDraft.bg_updated_at = 0; renderTheme(); flash('th-msg', 'Background removed'); }
+  catch (e) { flash('th-msg', e.message, false); }
 };
 
 // ── Uploads ──────────────────────────────────────────────────────────

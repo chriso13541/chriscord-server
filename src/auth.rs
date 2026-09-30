@@ -21,6 +21,8 @@ pub struct ServerInfoResp {
     /// Same idea for the server icon at /api/server/icon.
     pub icon_updated_at:   i64,
     pub owner:             Option<String>,
+    /// The server's own theme, or None if it's using the default look.
+    pub theme:             Option<crate::admin::ServerTheme>,
 }
 
 #[derive(Deserialize)]
@@ -68,6 +70,7 @@ pub async fn server_info(State(s): State<Arc<AppState>>) -> Json<ServerInfoResp>
         description: db::get_config(&s.pool, "server_description").await.unwrap_or(None).unwrap_or_default(),
         banner_updated_at: crate::admin::banner_updated_at(&s.pool).await,
         icon_updated_at: crate::admin::icon_updated_at(&s.pool).await,
+        theme: Some(crate::admin::server_theme(&s.pool).await).filter(|t| !t.is_default()),
         owner: crate::admin::owner_username(&s.pool).await,
     })
 }

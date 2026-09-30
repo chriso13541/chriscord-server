@@ -466,6 +466,145 @@ pub async fn serve_icon() -> axum::response::Response {
     }
 }
 
+// ── Server theme ──────────────────────────────────────────────────────────────
+//
+// The same controls as the app's Settings → Appearance, set for the whole
+// server: a theme color, an accent color, and an optional background image
+// with blur and darken. Members see it while connected unless they've
+// ticked "use my own theme" in their app. Colors live in config as JSON;
+// the image is a file in server_assets like the banner and icon.
+
+#[derive(Serialize, Deserialize, Clone, Default)]
+pub struct ServerTheme {
+    /// "#rrggbb", or None for the default gray.
+    pub base:   Option<String>,
+    pub accent: Option<String>,
+    /// 0–100 (%)
+    pub blur:   u8,
+    /// 0–90 (%)
+    pub dim:    u8,
+    /// Changes whenever the background image does (0 = none).
+    #[serde(default)]
+    pub bg_updated_at: i64,
+}
+
+impl ServerTheme {
+    pub fn is_default(&self) -> bool {
+        self.base.is_none() && self.accent.is_none() && self.bg_updated_at == 0
+    }
+}
+
+fn valid_hex(c: &str) -> bool {
+    c.len() == 7 && c.starts_with('#') && c[1..].chars().all(|ch| ch.is_ascii_hexdigit())
+}
+
+pub async fn server_theme(pool: &sqlx::SqlitePool) -> ServerTheme {
+    db::get_config(pool, "theme").await.ok().flatten()
+        .and_then(|j| serde_json::from_str(&j).ok())
+        .unwrap_or(ServerTheme { blur: 30, dim: 40, ..Default::default() })
+}
+
+async fn save_theme(pool: &sqlx::SqlitePool, t: &ServerTheme) -> Result<(), ApiErr> {
+    let j = serde_json::to_string(t).map_err(|_| dberr())?;
+    db::set_config(pool, "theme", &j).await.map_err(|_| dberr())
+}
+
+/// GET /api/admin/theme
+pub async fn get_theme(headers: HeaderMap, State(s): State<Arc<AppState>>) -> Result<Json<ServerTheme>, ApiErr> {
+    check_owner(&headers, &s)?;
+    Ok(Json(server_theme(&s.pool).await))
+}
+
+#[derive(Deserialize)]
+pub struct SetThemeReq {
+    pub base:   Option<String>,
+    pub accent: Option<String>,
+    pub blur:   u8,
+    pub dim:    u8,
+}
+
+/// POST /api/admin/theme {base, accent, blur, dim} — colors (null = default);
+/// the background image is set separately (it's a file upload).
+pub async fn set_theme(
+    headers: HeaderMap,
+    State(s): State<Arc<AppState>>,
+    Json(body): Json<SetThemeReq>,
+) -> Result<Json<serde_json::Value>, ApiErr> {
+    check_owner(&headers, &s)?;
+    let norm = |c: Option<String>| -> Result<Option<String>, ApiErr> {
+        match c.map(|c| c.trim().to_lowercase()).filter(|c| !c.is_empty()) {
+            Some(c) if valid_hex(&c) => Ok(Some(c)),
+            Some(_) => Err(bad("Colors must look like #1a2b3c")),
+            None => Ok(None),
+        }
+    };
+    let mut t = server_theme(&s.pool).await;
+    t.base = norm(body.base)?;
+    t.accent = norm(body.accent)?;
+    t.blur = body.blur.min(100);
+    t.dim = body.dim.min(90);
+    save_theme(&s.pool, &t).await?;
+    broadcast_server_updated(&s);
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+const THEME_BG_MAX_BYTES: usize = 8 << 20;
+fn theme_bg_path() -> std::path::PathBuf { server_assets_dir().join("theme_background") }
+
+/// POST /api/admin/theme/background — raw PNG/JPEG bytes (the admin panel
+/// scales it to at most 1920×1080 first).
+pub async fn upload_theme_bg(
+    headers: HeaderMap,
+    State(s): State<Arc<AppState>>,
+    body: axum::body::Bytes,
+) -> Result<Json<serde_json::Value>, ApiErr> {
+    check_owner(&headers, &s)?;
+    if body.len() > THEME_BG_MAX_BYTES {
+        return Err(bad("Background must be 8 MB or smaller"));
+    }
+    if !matches!(crate::pfp::image_mime(&body), Some("image/png") | Some("image/jpeg")) {
+        return Err(bad("Background must be a PNG or JPEG image"));
+    }
+    tokio::fs::write(theme_bg_path(), &body).await.map_err(|_| bad("Could not save the background"))?;
+    let mut t = server_theme(&s.pool).await;
+    t.bg_updated_at = chrono::Utc::now().timestamp_millis();
+    save_theme(&s.pool, &t).await?;
+    broadcast_server_updated(&s);
+    Ok(Json(serde_json::json!({ "ok": true, "bg_updated_at": t.bg_updated_at })))
+}
+
+/// DELETE /api/admin/theme/background
+pub async fn delete_theme_bg(
+    headers: HeaderMap,
+    State(s): State<Arc<AppState>>,
+) -> Result<Json<serde_json::Value>, ApiErr> {
+    check_owner(&headers, &s)?;
+    let _ = tokio::fs::remove_file(theme_bg_path()).await;
+    let mut t = server_theme(&s.pool).await;
+    t.bg_updated_at = 0;
+    save_theme(&s.pool, &t).await?;
+    broadcast_server_updated(&s);
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+/// GET /api/server/theme/background — members (session token) and the
+/// admin panel (owner key). 404 if none.
+pub async fn serve_theme_bg(headers: HeaderMap, State(s): State<Arc<AppState>>) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    let is_admin = check_owner(&headers, &s).is_ok();
+    let token = headers.get("X-Session-Token").and_then(|v| v.to_str().ok()).unwrap_or("");
+    if !is_admin && db::verify_token(&s.pool, token).await.ok().flatten().is_none() {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    match tokio::fs::read(theme_bg_path()).await {
+        Ok(data) => (
+            [(axum::http::header::CONTENT_TYPE, crate::pfp::image_mime(&data).unwrap_or("application/octet-stream"))],
+            data,
+        ).into_response(),
+        Err(_) => StatusCode::NOT_FOUND.into_response(),
+    }
+}
+
 // ── Members, owner crown, kicks and bans ─────────────────────────────────────
 
 /// GET /api/admin/members — everyone registered on this server.
