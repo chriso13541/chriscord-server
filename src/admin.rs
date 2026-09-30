@@ -23,6 +23,7 @@ pub struct AdminInfo {
     pub max_upload_mb:     u64,
     pub owner_username:    Option<String>,
     pub banner_updated_at: i64,
+    pub icon_updated_at:   i64,
 }
 
 #[derive(Deserialize)]
@@ -33,24 +34,38 @@ pub struct UpdateSettingsReq {
     pub max_upload_mb: Option<u64>,
 }
 
-/// Upload size limit bounds for the setting (MB).
-pub const MIN_UPLOAD_MB: u64 = 1;
+/// Upload size limit bounds for the setting (MB). 0 means unlimited.
+pub const MIN_UPLOAD_MB: u64 = 0;
 pub const MAX_UPLOAD_MB: u64 = 4096;
 pub const DEFAULT_UPLOAD_MB: u64 = 500;
 pub const MAX_DESCRIPTION_CHARS: usize = 300;
 
-/// The configured per-file upload limit, in bytes.
-pub async fn upload_limit_bytes(pool: &sqlx::SqlitePool) -> u64 {
-    let mb = db::get_config(pool, "max_upload_mb").await.ok().flatten()
+/// The configured per-file upload limit in MB, as set in the admin panel
+/// (0 = unlimited).
+pub async fn upload_limit_mb(pool: &sqlx::SqlitePool) -> u64 {
+    db::get_config(pool, "max_upload_mb").await.ok().flatten()
         .and_then(|v| v.parse::<u64>().ok())
         .unwrap_or(DEFAULT_UPLOAD_MB)
-        .clamp(MIN_UPLOAD_MB, MAX_UPLOAD_MB);
-    mb * 1024 * 1024
+        .clamp(MIN_UPLOAD_MB, MAX_UPLOAD_MB)
+}
+
+/// The per-file upload limit in bytes — u64::MAX when unlimited, so the
+/// size check in files.rs never trips.
+pub async fn upload_limit_bytes(pool: &sqlx::SqlitePool) -> u64 {
+    match upload_limit_mb(pool).await {
+        0 => u64::MAX,
+        mb => mb * 1024 * 1024,
+    }
 }
 
 /// The member shown with the crown, if one has been chosen.
 pub async fn owner_username(pool: &sqlx::SqlitePool) -> Option<String> {
     db::get_config(pool, "owner_username").await.ok().flatten().filter(|u| !u.is_empty())
+}
+
+pub async fn icon_updated_at(pool: &sqlx::SqlitePool) -> i64 {
+    db::get_config(pool, "icon_updated_at").await.ok().flatten()
+        .and_then(|v| v.parse().ok()).unwrap_or(0)
 }
 
 pub async fn banner_updated_at(pool: &sqlx::SqlitePool) -> i64 {
@@ -133,9 +148,10 @@ pub async fn get_admin_info(
         server_key,
         server_name,
         description,
-        max_upload_mb: upload_limit_bytes(&s.pool).await / (1024 * 1024),
+        max_upload_mb: upload_limit_mb(&s.pool).await,
         owner_username: owner_username(&s.pool).await,
         banner_updated_at: banner_updated_at(&s.pool).await,
+        icon_updated_at: icon_updated_at(&s.pool).await,
     }))
 }
 
@@ -167,7 +183,7 @@ pub async fn update_settings(
     }
     if let Some(mb) = body.max_upload_mb {
         if !(MIN_UPLOAD_MB..=MAX_UPLOAD_MB).contains(&mb) {
-            return Err(bad(&format!("Upload limit must be between {MIN_UPLOAD_MB} and {MAX_UPLOAD_MB} MB")));
+            return Err(bad(&format!("Upload limit must be between 1 and {MAX_UPLOAD_MB} MB, or 0 for unlimited")));
         }
         db::set_config(&s.pool, "max_upload_mb", &mb.to_string()).await.map_err(|_| dberr())?;
     }
@@ -388,6 +404,60 @@ pub async fn serve_banner(
         return StatusCode::UNAUTHORIZED.into_response();
     }
     match tokio::fs::read(banner_path()).await {
+        Ok(data) => (
+            [(axum::http::header::CONTENT_TYPE, crate::pfp::image_mime(&data).unwrap_or("application/octet-stream"))],
+            data,
+        ).into_response(),
+        Err(_) => StatusCode::NOT_FOUND.into_response(),
+    }
+}
+
+// ── Server icon ───────────────────────────────────────────────────────────────
+//
+// The picture shown for this server on the client's server list (instead
+// of a coloured letter). The admin panel crops it square and scales it to
+// 256×256 before uploading, so it's small; it's public (like /api/info),
+// because the server list shows it before you've joined.
+
+const ICON_MAX_BYTES: usize = 2 << 20;
+fn icon_path() -> std::path::PathBuf { server_assets_dir().join("icon") }
+
+/// POST /api/admin/icon — raw PNG/JPEG bytes as the request body.
+pub async fn upload_icon(
+    headers: HeaderMap,
+    State(s): State<Arc<AppState>>,
+    body: axum::body::Bytes,
+) -> Result<Json<serde_json::Value>, ApiErr> {
+    check_owner(&headers, &s)?;
+    if body.len() > ICON_MAX_BYTES {
+        return Err(bad("Server icon must be 2 MB or smaller"));
+    }
+    if !matches!(crate::pfp::image_mime(&body), Some("image/png") | Some("image/jpeg")) {
+        return Err(bad("Server icon must be a PNG or JPEG image"));
+    }
+    tokio::fs::write(icon_path(), &body).await.map_err(|_| bad("Could not save the icon"))?;
+    let now = chrono::Utc::now().timestamp_millis();
+    db::set_config(&s.pool, "icon_updated_at", &now.to_string()).await.map_err(|_| dberr())?;
+    broadcast_server_updated(&s);
+    Ok(Json(serde_json::json!({ "ok": true, "icon_updated_at": now })))
+}
+
+/// DELETE /api/admin/icon — back to the coloured letter.
+pub async fn delete_icon(
+    headers: HeaderMap,
+    State(s): State<Arc<AppState>>,
+) -> Result<Json<serde_json::Value>, ApiErr> {
+    check_owner(&headers, &s)?;
+    let _ = tokio::fs::remove_file(icon_path()).await;
+    db::set_config(&s.pool, "icon_updated_at", "0").await.map_err(|_| dberr())?;
+    broadcast_server_updated(&s);
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+/// GET /api/server/icon — public. 404 if there isn't one.
+pub async fn serve_icon() -> axum::response::Response {
+    use axum::response::IntoResponse;
+    match tokio::fs::read(icon_path()).await {
         Ok(data) => (
             [(axum::http::header::CONTENT_TYPE, crate::pfp::image_mime(&data).unwrap_or("application/octet-stream"))],
             data,

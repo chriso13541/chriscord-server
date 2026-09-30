@@ -18,6 +18,8 @@ pub struct ServerInfoResp {
     /// Changes whenever the banner does (0 = no banner), so clients know
     /// when to refetch /api/server/banner.
     pub banner_updated_at: i64,
+    /// Same idea for the server icon at /api/server/icon.
+    pub icon_updated_at:   i64,
     pub owner:             Option<String>,
 }
 
@@ -65,6 +67,7 @@ pub async fn server_info(State(s): State<Arc<AppState>>) -> Json<ServerInfoResp>
         requires_key: sk.map(|k| !k.is_empty()).unwrap_or(false),
         description: db::get_config(&s.pool, "server_description").await.unwrap_or(None).unwrap_or_default(),
         banner_updated_at: crate::admin::banner_updated_at(&s.pool).await,
+        icon_updated_at: crate::admin::icon_updated_at(&s.pool).await,
         owner: crate::admin::owner_username(&s.pool).await,
     })
 }

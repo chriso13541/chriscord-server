@@ -64,6 +64,14 @@
   .banner-preview.none { display:flex; align-items:center; justify-content:center; color:var(--muted); font-size:.85rem; }
   .banner-preview.none .bp-name { display:none; }
 
+  /* server icon: round, like the client's server list */
+  .icon-row { display:flex; align-items:center; gap:18px; margin-top:14px; flex-wrap:wrap; }
+  .icon-preview { width:88px; height:88px; border-radius:50%; background:var(--surface2) center/cover no-repeat; border:1px solid var(--border);
+    display:flex; align-items:center; justify-content:center; font-size:2rem; font-weight:700; color:#fff; flex-shrink:0; }
+  .icon-list-demo { display:flex; align-items:center; gap:12px; padding:10px 14px; border:1px solid var(--border); border-radius:10px; background:var(--bg); min-width:240px; }
+  .icon-list-demo .mini { width:44px; height:44px; border-radius:50%; background:var(--surface2) center/cover no-repeat; display:flex; align-items:center; justify-content:center; font-weight:700; color:#fff; flex-shrink:0; }
+  .icon-list-demo b { color:var(--strong); display:block; }
+  .icon-list-demo span { font-size:.78rem; color:var(--muted); }
   /* channels */
   .room { border:1px solid var(--border); border-radius:8px; padding:14px; margin-bottom:12px; }
   .room-head { display:flex; justify-content:space-between; align-items:center; gap:10px; }
@@ -182,6 +190,19 @@
         <textarea id="cfg-desc" maxlength="300" placeholder="What's this server about?"></textarea>
         <div class="hint" id="desc-count" style="text-align:right">0 / 300</div>
         <div class="row" style="margin-top:12px"><button id="custom-save">Save</button><span class="msg" id="custom-msg"></span></div>
+      </div>
+      <div class="card">
+        <h3>Server icon</h3>
+        <p class="hint">The picture shown for this server in the app's server list, instead of a coloured letter.
+          Any PNG or JPEG — it's cropped to a centred square and resized to 256×256 before uploading.</p>
+        <div class="icon-row">
+          <div class="icon-preview" id="icon-preview"></div>
+          <div class="icon-list-demo"><div class="mini" id="icon-mini"></div><div><b id="icon-demo-name">Server</b><span>How it looks in the server list</span></div></div>
+        </div>
+        <div class="row" style="margin-top:12px">
+          <input type="file" id="icon-file" accept="image/png,image/jpeg" hidden>
+          <button id="icon-choose"><svg class="ic"><use href="#i-image"/></svg>Upload icon</button>
+          <button class="ghost" id="icon-remove">Remove</button><span class="msg" id="icon-msg"></span></div>
       </div>
       <div class="card">
         <h3>Server banner</h3>
@@ -312,7 +333,8 @@ async function loadInfo() {
   $('cfg-maxup').value = info.max_upload_mb;
   $('st-upload').textContent = info.max_upload_mb === 0 ? 'Unlimited' : info.max_upload_mb >= 1024 ? (info.max_upload_mb / 1024).toFixed(info.max_upload_mb % 1024 ? 1 : 0) + ' GB' : info.max_upload_mb + ' MB';
   $('bp-name').textContent = info.server_name;
-  await showBanner();
+  $('icon-demo-name').textContent = info.server_name;
+  await Promise.all([showBanner(), showIcon()]);
 }
 async function showBanner() {
   const p = $('banner-preview');
@@ -334,7 +356,7 @@ $('joinkey-copy').onclick = () => navigator.clipboard.writeText($('cfg-joinkey')
 // ── Customization ────────────────────────────────────────────────────
 function updateDescCount() { $('desc-count').textContent = `${[...$('cfg-desc').value].length} / 300`; }
 $('cfg-desc').oninput = updateDescCount;
-$('cfg-name').oninput = () => $('bp-name').textContent = $('cfg-name').value;
+$('cfg-name').oninput = () => { $('bp-name').textContent = $('cfg-name').value; $('icon-demo-name').textContent = $('cfg-name').value; showIcon(false); };
 $('custom-save').onclick = async () => {
   const name = $('cfg-name').value.trim();
   if (!name) return flash('custom-msg', 'The server needs a name', false);
@@ -354,6 +376,59 @@ $('banner-file').onchange = async () => {
 $('banner-remove').onclick = async () => {
   try { await api('/api/admin/banner', { method: 'DELETE' }); info.banner_updated_at = 0; await showBanner(); flash('banner-msg', 'Banner removed'); }
   catch (e) { flash('banner-msg', e.message, false); }
+};
+
+// ── Server icon ──────────────────────────────────────────────────────
+// Letter + colour fallback matches the client's server list, which colours
+// by the server's address.
+function letterIcon(el) {
+  const name = $('cfg-name').value || info.server_name || '?';
+  el.style.backgroundImage = ''; el.textContent = name[0].toUpperCase(); el.style.backgroundColor = colour(location.host);
+}
+let iconURL = '';
+async function showIcon(refetch = true) {
+  const els = [$('icon-preview'), $('icon-mini')];
+  if (!info.icon_updated_at) { if (iconURL) URL.revokeObjectURL(iconURL); iconURL = ''; els.forEach(letterIcon); return; }
+  if (refetch || !iconURL) {
+    const res = await fetch('/api/server/icon?v=' + info.icon_updated_at);
+    if (!res.ok) { els.forEach(letterIcon); return; }
+    if (iconURL) URL.revokeObjectURL(iconURL);
+    iconURL = URL.createObjectURL(await res.blob());
+  }
+  els.forEach(el => { el.textContent = ''; el.style.backgroundColor = ''; el.style.backgroundImage = `url("${iconURL}")`; });
+}
+// Centre-crops to a square and scales to 256×256 in the browser, so the
+// server only ever stores a small icon. PNG in → PNG out (keeps any
+// transparency); JPEG in → JPEG out.
+function squareIcon(file) {
+  return new Promise((resolve, reject) => {
+    const img = new Image(), url = URL.createObjectURL(file);
+    img.onload = () => {
+      const side = Math.min(img.naturalWidth, img.naturalHeight), out = Math.min(256, side);
+      const c = document.createElement('canvas'); c.width = c.height = out;
+      const ctx = c.getContext('2d'); ctx.imageSmoothingQuality = 'high';
+      ctx.drawImage(img, (img.naturalWidth - side) / 2, (img.naturalHeight - side) / 2, side, side, 0, 0, out, out);
+      URL.revokeObjectURL(url);
+      const type = file.type === 'image/jpeg' ? 'image/jpeg' : 'image/png';
+      c.toBlob(b => b ? resolve(b) : reject(new Error('Could not process that image')), type, 0.92);
+    };
+    img.onerror = () => { URL.revokeObjectURL(url); reject(new Error('That file isn\u2019t a readable image')); };
+    img.src = url;
+  });
+}
+$('icon-choose').onclick = () => $('icon-file').click();
+$('icon-file').onchange = async () => {
+  const f = $('icon-file').files[0]; $('icon-file').value = '';
+  if (!f) return;
+  try {
+    const blob = await squareIcon(f);
+    const r = await api('/api/admin/icon', { method: 'POST', body: blob, headers: { 'Content-Type': blob.type } });
+    info.icon_updated_at = r.icon_updated_at; await showIcon(); flash('icon-msg', 'Icon updated');
+  } catch (e) { flash('icon-msg', e.message, false); }
+};
+$('icon-remove').onclick = async () => {
+  try { await api('/api/admin/icon', { method: 'DELETE' }); info.icon_updated_at = 0; await showIcon(); flash('icon-msg', 'Icon removed'); }
+  catch (e) { flash('icon-msg', e.message, false); }
 };
 
 // ── Uploads ──────────────────────────────────────────────────────────
