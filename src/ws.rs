@@ -396,8 +396,10 @@ fn broadcast_voice_state(state: &Arc<AppState>) {
 }
 
 /// Sends everyone the member list: who's online (invisible people are
-/// left out, so they look offline) and each online person's status
-/// ("online" or "idle").
+/// left out, so they look offline) and, under "presence", each online
+/// person's status ("online" or "idle"). Not "statuses" — that key already
+/// means the voice mute/deafen list on voice_status_snapshot, and the Go
+/// client decodes every server message into one struct.
 fn broadcast_users(state: &Arc<AppState>) {
     let (online, statuses) = {
         let o = state.online.lock().unwrap();
@@ -415,7 +417,7 @@ fn broadcast_users(state: &Arc<AppState>) {
     let state = Arc::clone(state);
     tokio::spawn(async move {
         let all = crate::db::all_known_users(&state.pool).await.unwrap_or_default();
-        let _ = state.tx.send(serde_json::json!({ "type": "users", "online": online, "statuses": statuses, "all": all }).to_string());
+        let _ = state.tx.send(serde_json::json!({ "type": "users", "online": online, "presence": statuses, "all": all }).to_string());
     });
 }
 
