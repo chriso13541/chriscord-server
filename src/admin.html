@@ -200,10 +200,10 @@
       <h2>Uploads</h2><p class="sub">Limits for files members attach to messages.</p>
       <div class="card">
         <label class="f" for="cfg-maxup" style="margin-top:0">Maximum file size (MB)</label>
-        <div class="row"><input type="number" id="cfg-maxup" min="1" max="4096" style="width:140px">
+        <div class="row"><input type="number" id="cfg-maxup" min="0" max="4096" style="width:140px">
           <button class="ghost small" data-mb="25">25 MB</button><button class="ghost small" data-mb="100">100 MB</button>
-          <button class="ghost small" data-mb="500">500 MB</button><button class="ghost small" data-mb="2048">2 GB</button></div>
-        <p class="hint">Applies to each file. Bigger uploads are rejected with a message telling the member the limit.
+          <button class="ghost small" data-mb="500">500 MB</button><button class="ghost small" data-mb="2048">2 GB</button><button class="ghost small" data-mb="0">Unlimited</button></div>
+        <p class="hint">Applies to each file; <b>0 means unlimited</b>. Bigger uploads are rejected with a message telling the member the limit.
           Keep an eye on free disk space on the server — uploads are stored in <code>./uploads</code>.</p>
         <div class="row" style="margin-top:12px"><button id="uploads-save">Save</button><span class="msg" id="uploads-msg"></span></div>
       </div>
@@ -310,7 +310,7 @@ async function loadInfo() {
   $('cfg-name').value = info.server_name;
   $('cfg-desc').value = info.description || ''; updateDescCount();
   $('cfg-maxup').value = info.max_upload_mb;
-  $('st-upload').textContent = info.max_upload_mb >= 1024 ? (info.max_upload_mb / 1024).toFixed(info.max_upload_mb % 1024 ? 1 : 0) + ' GB' : info.max_upload_mb + ' MB';
+  $('st-upload').textContent = info.max_upload_mb === 0 ? 'Unlimited' : info.max_upload_mb >= 1024 ? (info.max_upload_mb / 1024).toFixed(info.max_upload_mb % 1024 ? 1 : 0) + ' GB' : info.max_upload_mb + ' MB';
   $('bp-name').textContent = info.server_name;
   await showBanner();
 }
@@ -360,7 +360,7 @@ $('banner-remove').onclick = async () => {
 document.querySelectorAll('[data-mb]').forEach(b => b.onclick = () => $('cfg-maxup').value = b.dataset.mb);
 $('uploads-save').onclick = async () => {
   const mb = parseInt($('cfg-maxup').value, 10);
-  if (!(mb >= 1 && mb <= 4096)) return flash('uploads-msg', 'Choose between 1 and 4096 MB', false);
+  if (!(mb >= 0 && mb <= 4096)) return flash('uploads-msg', 'Choose between 1 and 4096 MB, or 0 for unlimited', false);
   try { await api('/api/admin/settings', { json: { max_upload_mb: mb } }); await loadInfo(); flash('uploads-msg', 'Saved'); }
   catch (e) { flash('uploads-msg', e.message, false); }
 };
