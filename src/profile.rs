@@ -9,9 +9,9 @@
 // copy is missing or older, and a fresh upload is broadcast as
 // profile_updated so anyone showing that user's card knows to refetch.
 //
-// On disk, per user:
-//   pfps/<username>.profile.json  — { bio, updated_at, has_banner }
-//   pfps/<username>.banner        — the banner image, if they set one
+// On disk, per account (named by its public key — see pfp::storage_key_for):
+//   pfps/<key>.profile.json  — { bio, updated_at, has_banner }
+//   pfps/<key>.banner        — the banner image, if they set one
 //
 // The default banner (a colour picked from the user's pfp) is computed by
 // the viewing client, not stored here — there's nothing to cache for it.
@@ -93,14 +93,14 @@ pub async fn get_profile(
     if crate::db::verify_token(&s.pool, token_from(&headers)).await.ok().flatten().is_none() {
         return StatusCode::UNAUTHORIZED.into_response();
     }
-    let row = sqlx::query("SELECT created_at FROM users WHERE username = ?")
+    let row = sqlx::query("SELECT created_at, public_key FROM users WHERE username = ?")
         .bind(&username).fetch_optional(&s.pool).await;
-    let member_since: String = match row {
-        Ok(Some(r)) => r.get("created_at"),
+    let (member_since, key): (String, String) = match row {
+        Ok(Some(r)) => (r.get("created_at"), r.get::<String, _>("public_key").to_lowercase()),
         Ok(None) => return StatusCode::NOT_FOUND.into_response(),
         Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     };
-    let p = read_stored(&username).unwrap_or_default();
+    let p = read_stored(&key).unwrap_or_default();
     Json(serde_json::json!({
         "username": username,
         "bio": p.bio,
@@ -119,10 +119,10 @@ pub async fn serve_banner(
     if crate::db::verify_token(&s.pool, token_from(&headers)).await.ok().flatten().is_none() {
         return StatusCode::UNAUTHORIZED.into_response();
     }
-    let Some(username) = sanitize_username(&username) else {
+    let Some(key) = crate::pfp::storage_key_for(&s.pool, &username).await else {
         return StatusCode::NOT_FOUND.into_response();
     };
-    match tokio::fs::read(pfps_dir().join(format!("{username}.banner"))).await {
+    match tokio::fs::read(pfps_dir().join(format!("{key}.banner"))).await {
         Ok(data) => Response::builder()
             .header(header::CONTENT_TYPE, image_mime(&data).unwrap_or("application/octet-stream"))
             .body(Body::from(data))

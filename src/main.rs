@@ -29,6 +29,7 @@ async fn main() {
     tracing_subscriber::fmt::init();
 
     let pool = db::init().await.expect("Failed to initialize database");
+    pfp::migrate_to_key_names(&pool).await; // pfps/<username>.* → pfps/<public key>.*
 
     let owner_key =
         db::get_or_create_config(&pool, "owner_key", || utils::generate_hex(32))

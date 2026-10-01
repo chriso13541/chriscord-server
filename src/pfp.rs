@@ -1,7 +1,7 @@
 // pfp.rs — server-side profile picture caching.
 //
-// Each user's uploaded picture is cached on disk as pfps/<username>.png,
-// alongside a small sidecar pfps/<username>.ts holding the client-reported
+// Each user's uploaded picture is cached on disk as pfps/<key>.png,
+// alongside a small sidecar pfps/<key>.ts holding the client-reported
 // Unix timestamp of when that picture was last changed. That sidecar is
 // what lets the server tell a connecting client "I already have your
 // current picture, no need to re-upload" without a database migration or
@@ -42,6 +42,43 @@ fn token_from(h: &HeaderMap) -> &str {
 
 /// The on-disk cache directory, created on first use if it doesn't exist
 /// yet — same relative-to-cwd convention as chriscord.db itself.
+/// Files here are named by the account's public key (hex), not its
+/// username: a username can be freed up (a kick removes the account) and
+/// then taken by someone else, who must not inherit the old picture,
+/// banner and bio. The key belongs to exactly one account, forever.
+/// Resolves the key for a username via the users table.
+pub async fn storage_key_for(pool: &sqlx::SqlitePool, username: &str) -> Option<String> {
+    use sqlx::Row;
+    let row = sqlx::query("SELECT public_key FROM users WHERE username = ?")
+        .bind(username).fetch_optional(pool).await.ok().flatten()?;
+    let key: String = row.get("public_key");
+    // Only ever hex — but never let anything else near a file name.
+    if key.is_empty() || !key.chars().all(|c| c.is_ascii_hexdigit()) { return None; }
+    Some(key.to_lowercase())
+}
+
+/// One-time move of files saved under the old username-based names to the
+/// key-based ones, for every account this server knows. Safe to run on
+/// every start: it only renames when the old file exists and the new one
+/// doesn't.
+pub async fn migrate_to_key_names(pool: &sqlx::SqlitePool) {
+    use sqlx::Row;
+    let Ok(rows) = sqlx::query("SELECT public_key, username FROM users").fetch_all(pool).await else { return };
+    let dir = pfps_dir();
+    let mut moved = 0;
+    for r in rows {
+        let key: String = r.get::<String, _>("public_key").to_lowercase();
+        let user: String = r.get("username");
+        if !key.chars().all(|c| c.is_ascii_hexdigit()) { continue; }
+        let Some(user) = sanitize_username(&user) else { continue };
+        for ext in ["png", "ts", "profile.json", "banner"] {
+            let (old, new) = (dir.join(format!("{user}.{ext}")), dir.join(format!("{key}.{ext}")));
+            if old.exists() && !new.exists() && std::fs::rename(&old, &new).is_ok() { moved += 1; }
+        }
+    }
+    if moved > 0 { tracing::info!("pfp: moved {moved} profile file(s) to account-key names"); }
+}
+
 pub fn pfps_dir() -> PathBuf {
     let dir = PathBuf::from("./pfps");
     let _ = std::fs::create_dir_all(&dir);
@@ -141,10 +178,10 @@ pub async fn serve_pfp(
     if crate::db::verify_token(&s.pool, token_from(&headers)).await.ok().flatten().is_none() {
         return StatusCode::UNAUTHORIZED.into_response();
     }
-    let Some(username) = sanitize_username(&username) else {
-        return StatusCode::BAD_REQUEST.into_response();
+    let Some(key) = storage_key_for(&s.pool, &username).await else {
+        return StatusCode::NOT_FOUND.into_response();
     };
-    let path = pfps_dir().join(format!("{username}.png"));
+    let path = pfps_dir().join(format!("{key}.png"));
     match std::fs::read(&path) {
         Ok(data) => {
             tracing::info!("voice: serving {} bytes for {username}'s pfp", data.len());

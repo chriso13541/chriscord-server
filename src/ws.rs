@@ -69,6 +69,8 @@ async fn handle_socket(socket: WebSocket, token: String, initial_status: Option<
         Ok(Some(u)) => u,
         _ => return,
     };
+    // Where this account's picture/banner/bio are stored (by public key).
+    let user_key = crate::pfp::storage_key_for(&state.pool, &username).await.unwrap_or_default();
     if let Some(st) = initial_status.filter(|s| valid_status(s)) {
         state.presence.lock().unwrap().insert(username.clone(), st);
     }
@@ -222,7 +224,7 @@ async fn handle_socket(socket: WebSocket, token: String, initial_status: Option<
                                 // anything, doesn't match. A matching timestamp means
                                 // our cache is already current, so there's nothing to do.
                                 if let Some(updated_at) = cm.pfp_updated_at {
-                                    if updated_at > 0 && crate::pfp::cached_timestamp(&username) != Some(updated_at) {
+                                    if updated_at > 0 && !user_key.is_empty() && crate::pfp::cached_timestamp(&user_key) != Some(updated_at) {
                                         send_to_user(&state, &username, serde_json::json!({
                                             "type": "pfp_request",
                                         }));
@@ -235,7 +237,7 @@ async fn handle_socket(socket: WebSocket, token: String, initial_status: Option<
                                     tracing::info!("voice: pfp_upload from {username}: {} base64 chars", data.len());
                                     if let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(&data) {
                                         tracing::info!("voice: pfp_upload from {username}: decoded to {} bytes", bytes.len());
-                                        let saved = crate::pfp::save_cached(&username, &bytes, updated_at);
+                                        let saved = crate::pfp::save_cached(&user_key, &bytes, updated_at);
                                         if let Err(e) = &saved {
                                             tracing::warn!("voice: rejected pfp from {username}: {e}");
                                         }
@@ -277,7 +279,7 @@ async fn handle_socket(socket: WebSocket, token: String, initial_status: Option<
                             // Profile (bio + banner) sync — same handshake as the pfp above.
                             "profile_info" => {
                                 if let Some(updated_at) = cm.profile_updated_at {
-                                    if updated_at > 0 && crate::profile::cached_timestamp(&username) != Some(updated_at) {
+                                    if updated_at > 0 && !user_key.is_empty() && crate::profile::cached_timestamp(&user_key) != Some(updated_at) {
                                         send_to_user(&state, &username, serde_json::json!({ "type": "profile_request" }));
                                     }
                                 }
@@ -293,7 +295,7 @@ async fn handle_socket(socket: WebSocket, token: String, initial_status: Option<
                                         _ => None,
                                     };
                                     let bio = cm.bio.unwrap_or_default();
-                                    match crate::profile::save_cached(&username, &bio, banner.as_deref(), updated_at) {
+                                    match crate::profile::save_cached(&user_key, &bio, banner.as_deref(), updated_at) {
                                         Ok(()) => {
                                             let _ = state.tx.send(serde_json::json!({
                                                 "type": "profile_updated", "username": username, "updated_at": updated_at,
