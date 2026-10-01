@@ -83,9 +83,29 @@ async fn handle_socket(socket: WebSocket, token: String, initial_status: Option<
     let mut subscribed_board: Option<String> = None;
     let (mut sink, mut stream) = socket.split();
 
+    // Heartbeat: ping every WS_PING_EVERY; anything received (a message, a
+    // pong, the client's own ping) counts as alive. Nothing for
+    // WS_DEAD_AFTER means the client is gone without saying so — network
+    // dropped, machine asleep, app killed — and the connection is ended
+    // here rather than lingering until TCP gives up minutes later.
+    let mut heartbeat = tokio::time::interval(WS_PING_EVERY);
+    heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let mut last_seen = std::time::Instant::now();
+    // A close frame means the app ended the connection on purpose (quit,
+    // left the server) — then there's no "reconnecting" grace period.
+    let mut closed_on_purpose = false;
+
     loop {
         tokio::select! {
+            _ = heartbeat.tick() => {
+                if last_seen.elapsed() > WS_DEAD_AFTER {
+                    tracing::info!("ws: {username} stopped responding — dropping the connection");
+                    break;
+                }
+                if sink.send(Message::Ping(Vec::new())).await.is_err() { break; }
+            }
             msg = stream.next() => {
+                if matches!(msg, Some(Ok(_))) { last_seen = std::time::Instant::now(); }
                 match msg {
                     Some(Ok(Message::Text(text))) => {
                         let Ok(cm) = serde_json::from_str::<ClientMsg>(&text) else { continue };
@@ -315,7 +335,8 @@ async fn handle_socket(socket: WebSocket, token: String, initial_status: Option<
                             _ => {}
                         }
                     }
-                    None | Some(Ok(Message::Close(_))) => break,
+                    Some(Ok(Message::Close(_))) => { closed_on_purpose = true; break; }
+                    None => break,
                     Some(Err(_)) => break,
                     _ => {}
                 }
@@ -378,10 +399,15 @@ async fn handle_socket(socket: WebSocket, token: String, initial_status: Option<
     // from the channel (which looks like they left), they stay listed as
     // "reconnecting" for VOICE_REJOIN_GRACE, since the app rejoins on its
     // own when it gets back. If it doesn't come back in time, they're
-    // removed then. (A client closed on purpose looks the same from here,
-    // so it just lingers faded for the grace period.)
+    // removed then. A client that closed on purpose (quit, or left the
+    // server) sends a close frame first, and is removed straight away.
     let left_board = { state.voice.lock().unwrap().remove(&username) };
-    if let Some(bid) = left_board {
+    if let Some(bid) = left_board.clone().filter(|_| closed_on_purpose) {
+        // Left on purpose (the app sent a close frame): out of the call now.
+        { state.voice_status.lock().unwrap().remove(&username); }
+        voice::close_participant(&state, &bid, &username).await;
+        broadcast_voice_state(&state);
+    } else if let Some(bid) = left_board {
         { state.voice_status.lock().unwrap().remove(&username); }
         voice::close_participant(&state, &bid, &username).await;
         let drop_id = NEXT_DROP_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -416,6 +442,10 @@ pub fn send_to_user(state: &Arc<AppState>, target_username: &str, mut payload: s
 /// How long someone whose connection dropped mid-call stays listed as
 /// "reconnecting" before they're taken out of the channel.
 const VOICE_REJOIN_GRACE: std::time::Duration = std::time::Duration::from_secs(60);
+/// Heartbeat timing (see handle_socket). The app pings every 10 s too, so
+/// a live client is never quiet for anywhere near this long.
+const WS_PING_EVERY: std::time::Duration = std::time::Duration::from_secs(20);
+const WS_DEAD_AFTER: std::time::Duration = std::time::Duration::from_secs(50);
 static NEXT_DROP_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
 fn broadcast_voice_state(state: &Arc<AppState>) {
