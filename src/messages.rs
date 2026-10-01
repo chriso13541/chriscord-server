@@ -27,7 +27,20 @@ pub struct MessagesQuery {
 
 #[derive(Deserialize)]
 pub struct SearchQuery {
+    /// Words to find (may be empty when only filters are used). "quoted
+    /// phrases" are matched as a phrase.
+    #[serde(default)]
     pub q: String,
+    /// from: — exact username (case-insensitive)
+    pub from: Option<String>,
+    /// has: — comma-separated: link, image, video, audio, file
+    pub has: Option<String>,
+    /// in: — a board (channel) id
+    #[serde(rename = "in")]
+    pub in_board: Option<String>,
+    /// date range, as RFC 3339 instants: after is inclusive, before exclusive
+    pub after: Option<String>,
+    pub before: Option<String>,
 }
 
 // ── Types ─────────────────────────────────────────────────────────────────────
@@ -238,11 +251,12 @@ pub async fn get_messages_around(
     Ok(Json(result))
 }
 
-/// Searches every board on this host, not just one channel — "rooms" here
-/// are Discord-style categories inside a single server, not separate
-/// joinable spaces, so a server-wide search is the natural default. Per-
-/// channel scoping comes back later as the in: filter, applied on top of
-/// this same query rather than as a separate endpoint.
+/// Searches every board on this host (or one, with in:), combining the
+/// text query with Discord-style filters: from:, has:, in: and a date range.
+/// Text matching uses the FTS5 full-text index (whole words, ignoring case
+/// and accents); filters are plain SQL conditions on the same query. At
+/// least one of text or a filter is needed. Newest SEARCH_LIMIT matches,
+/// returned in chronological order like get_messages.
 pub async fn search_messages(
     headers:  HeaderMap,
     Query(q): Query<SearchQuery>,
@@ -251,34 +265,79 @@ pub async fn search_messages(
     db::verify_token(&s.pool, token_from(&headers)).await
         .map_err(|_| db_err())?.ok_or_else(unauth)?;
 
-    let term = q.q.trim();
-    if term.is_empty() {
+    let term = q.q.trim().to_string();
+    let mut wheres: Vec<String> = Vec::new();
+    let mut binds: Vec<String> = Vec::new();
+    let use_fts = db::FTS_AVAILABLE.load(std::sync::atomic::Ordering::Relaxed);
+
+    if !term.is_empty() {
+        if use_fts {
+            match fts_query(&term) {
+                Some(m) => {
+                    wheres.push("m.rowid IN (SELECT rowid FROM messages_fts WHERE messages_fts MATCH ?)".into());
+                    binds.push(m);
+                }
+                None => return Ok(Json(vec![])), // nothing searchable in it (only punctuation)
+            }
+        } else {
+            let escaped = term.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_");
+            wheres.push("m.content LIKE ? ESCAPE '\\'".into());
+            binds.push(format!("%{escaped}%"));
+        }
+    }
+    if let Some(from) = q.from.as_deref().map(str::trim).filter(|f| !f.is_empty()) {
+        wheres.push("m.username = ? COLLATE NOCASE".into());
+        binds.push(from.to_string());
+    }
+    if let Some(board) = q.in_board.as_deref().map(str::trim).filter(|b| !b.is_empty()) {
+        wheres.push("m.board_id = ?".into());
+        binds.push(board.to_string());
+    }
+    for kind in q.has.as_deref().unwrap_or("").split(',').map(|k| k.trim().to_lowercase()).filter(|k| !k.is_empty()) {
+        let mime = |prefix: &str| format!(
+            "(m.attachments LIKE '%\"mime\":\"{prefix}/%' OR m.attachment_mime LIKE '{prefix}/%')"
+        );
+        let cond = match kind.as_str() {
+            "link" => "(m.content LIKE '%http://%' OR m.content LIKE '%https://%')".to_string(),
+            "image" => mime("image"),
+            "video" => mime("video"),
+            "audio" | "sound" => mime("audio"),
+            "file" | "attachment" =>
+                "((m.attachments IS NOT NULL AND m.attachments NOT IN ('', '[]')) OR m.attachment_url IS NOT NULL)".to_string(),
+            other => return Err((StatusCode::BAD_REQUEST, Json(serde_json::json!({
+                "error": format!("Unknown has: filter \"{other}\" — use link, image, video, audio or file")
+            })))),
+        };
+        wheres.push(cond);
+    }
+    if let Some(after) = q.after.as_deref().filter(|d| !d.is_empty()) {
+        wheres.push("julianday(m.created_at) >= julianday(?)".into());
+        binds.push(after.to_string());
+    }
+    if let Some(before) = q.before.as_deref().filter(|d| !d.is_empty()) {
+        wheres.push("julianday(m.created_at) < julianday(?)".into());
+        binds.push(before.to_string());
+    }
+    if wheres.is_empty() {
         return Ok(Json(vec![]));
     }
-    // Escape SQL LIKE wildcards in the user's query so someone searching for
-    // a literal "%" or "_" gets literal matches, not wildcard behaviour.
-    let escaped = term.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_");
-    let pattern = format!("%{}%", escaped);
 
-    // Stage 1: a cheap SQL substring pre-filter across every board. No
-    // index can serve a leading-wildcard LIKE, so this is a full scan of
-    // the host's messages every search — fine at thousands of messages;
-    // SQLite's FTS5 extension is the documented next step if that changes.
-    // No LIMIT here: stage 2 below can shrink the candidate set
-    // unpredictably (a substring hit isn't necessarily a whole-word hit),
-    // so truncating has to happen after filtering, not before.
-    let rows = sqlx::query(
-        &format!("{} WHERE m.content LIKE ? ESCAPE '\\' ORDER BY m.id DESC", SEARCH_SELECT)
-    ).bind(&pattern)
-     .fetch_all(&s.pool).await.map_err(|_| db_err())?;
+    // The LIKE fallback can't tell words from substrings, so it fetches
+    // everything and filters in Rust (the old behaviour); FTS needs neither.
+    let limit = if use_fts || term.is_empty() { format!(" LIMIT {SEARCH_LIMIT}") } else { String::new() };
+    let sql = format!("{} WHERE {} ORDER BY m.id DESC{limit}", SEARCH_SELECT, wheres.join(" AND "));
+    let mut query = sqlx::query(&sql);
+    for b in &binds {
+        query = query.bind(b);
+    }
+    let rows = query.fetch_all(&s.pool).await.map_err(|e| {
+        tracing::warn!("search failed: {e}");
+        db_err()
+    })?;
 
-    // Stage 2: keep only messages where the term appears as a standalone
-    // word/phrase — bounded by non-alphanumeric characters or the string's
-    // edges — not merely as a substring. This is the whole reason searching
-    // "hi" shouldn't return a message that only says "this".
     let mut matches: Vec<SearchResult> = rows.iter()
         .map(row_to_search_result)
-        .filter(|r| contains_whole_word(&r.message.content, term))
+        .filter(|r| use_fts || term.is_empty() || contains_whole_word(&r.message.content, &term))
         .take(SEARCH_LIMIT)
         .collect();
     matches.reverse(); // newest-first -> chronological, matching get_messages
@@ -289,14 +348,37 @@ pub async fn search_messages(
     Ok(Json(matches))
 }
 
-/// True if `term` appears in `content` as a standalone word or phrase,
-/// rather than merely as a substring — "hi" matches a message that says
-/// "hi" but not one that only says "this". A match counts if the character
-/// immediately before and after it (if any) is not alphanumeric, so this
-/// also works for a multi-word term as an implicit phrase match (the words
-/// must be adjacent, in order) without needing separate quote syntax.
-/// ASCII-only case folding, matching the LIKE pre-filter's own case
-/// behaviour above (SQLite's default LIKE only case-folds ASCII).
+/// Turns typed text into an FTS5 query: every word must appear (in any
+/// order), "quoted text" must appear as a phrase. Each piece is quoted so
+/// FTS5 operators/punctuation in what people type can't break the query.
+/// None if nothing searchable is left.
+fn fts_query(text: &str) -> Option<String> {
+    let mut parts: Vec<String> = Vec::new();
+    let mut rest = text;
+    while !rest.is_empty() {
+        rest = rest.trim_start();
+        if rest.is_empty() { break; }
+        let (piece, next) = if let Some(after_quote) = rest.strip_prefix('"') {
+            match after_quote.find('"') {
+                Some(end) => (&after_quote[..end], &after_quote[end + 1..]),
+                None => (after_quote, ""),
+            }
+        } else {
+            let end = rest.find(char::is_whitespace).unwrap_or(rest.len());
+            (&rest[..end], &rest[end..])
+        };
+        rest = next;
+        // Keep letters, digits and inner spaces (for phrases); everything
+        // else just separates words, as the tokenizer would.
+        let cleaned: String = piece.chars().map(|c| if c.is_alphanumeric() { c } else { ' ' }).collect();
+        let cleaned = cleaned.split_whitespace().collect::<Vec<_>>().join(" ");
+        if !cleaned.is_empty() {
+            parts.push(format!("\"{cleaned}\""));
+        }
+    }
+    if parts.is_empty() { None } else { Some(parts.join(" ")) }
+}
+
 fn contains_whole_word(content: &str, term: &str) -> bool {
     let content = content.to_ascii_lowercase();
     let term = term.to_ascii_lowercase();

@@ -1,6 +1,9 @@
 use sqlx::{sqlite::{SqliteConnectOptions, SqlitePoolOptions}, Row, SqlitePool};
 use std::str::FromStr;
 
+/// Whether the messages_fts full-text index is available (see init).
+pub static FTS_AVAILABLE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 pub async fn init() -> Result<SqlitePool, sqlx::Error> {
     let opts = SqliteConnectOptions::from_str("sqlite:./chriscord.db")?
         .create_if_missing(true)
@@ -95,6 +98,40 @@ pub async fn init() -> Result<SqlitePool, sqlx::Error> {
     )
     .execute(&pool)
     .await?;
+
+    // Full-text search index over message text (SQLite FTS5), kept in step
+    // with the messages table by triggers. Word-based, case- and accent-
+    // insensitive, and indexed — so search stays fast however many messages
+    // there are. Built from existing messages the first time it's created.
+    // If this SQLite lacks FTS5, search falls back to the old LIKE scan.
+    let fts_existed = sqlx::query("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'messages_fts'")
+        .fetch_optional(&pool).await?.is_some();
+    let fts_ok = sqlx::query(
+        "CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
+            content, content='messages', content_rowid='rowid',
+            tokenize='unicode61 remove_diacritics 2'
+        )",
+    ).execute(&pool).await.is_ok();
+    if fts_ok {
+        for trigger in [
+            "CREATE TRIGGER IF NOT EXISTS messages_fts_ai AFTER INSERT ON messages BEGIN
+                INSERT INTO messages_fts(rowid, content) VALUES (new.rowid, new.content); END",
+            "CREATE TRIGGER IF NOT EXISTS messages_fts_ad AFTER DELETE ON messages BEGIN
+                INSERT INTO messages_fts(messages_fts, rowid, content) VALUES ('delete', old.rowid, old.content); END",
+            "CREATE TRIGGER IF NOT EXISTS messages_fts_au AFTER UPDATE OF content ON messages BEGIN
+                INSERT INTO messages_fts(messages_fts, rowid, content) VALUES ('delete', old.rowid, old.content);
+                INSERT INTO messages_fts(rowid, content) VALUES (new.rowid, new.content); END",
+        ] {
+            sqlx::query(trigger).execute(&pool).await?;
+        }
+        if !fts_existed {
+            sqlx::query("INSERT INTO messages_fts(messages_fts) VALUES ('rebuild')").execute(&pool).await?;
+            tracing::info!("search: built the full-text index from existing messages");
+        }
+    } else {
+        tracing::warn!("search: FTS5 isn't available in this SQLite build — using slower substring search");
+    }
+    FTS_AVAILABLE.store(fts_ok, std::sync::atomic::Ordering::Relaxed);
 
     // Emoji reactions: one row per (message, emoji, person). The primary key
     // makes reacting idempotent; created_at orders a message's reactions by
