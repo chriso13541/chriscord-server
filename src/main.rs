@@ -49,6 +49,7 @@ async fn main() {
         challenges: Mutex::new(HashMap::new()),
         voice:      Mutex::new(HashMap::new()),
         voice_status: Mutex::new(HashMap::new()),
+        voice_reconnecting: Mutex::new(HashMap::new()),
         voice_runtime: voice::VoiceRuntime::new().await,
         file_links: Mutex::new(HashMap::new()),
     });

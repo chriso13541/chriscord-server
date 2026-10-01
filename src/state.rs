@@ -31,6 +31,12 @@ pub struct AppState {
     /// immediately, rather than only learning it the next time someone
     /// happens to toggle.
     pub voice_status: Mutex<HashMap<String, (bool, bool)>>,
+    /// People whose connection dropped while they were in a call:
+    /// username → (voice board, drop id). They stay listed in that channel
+    /// as "reconnecting" (faded, red name) for VOICE_REJOIN_GRACE, so
+    /// everyone can tell a dropped connection from someone leaving. Cleared
+    /// when they rejoin, leave on purpose, or the grace period runs out.
+    pub voice_reconnecting: Mutex<HashMap<String, (String, u64)>>,
     /// The actual WebRTC SFU state — PeerConnections and forwarded audio
     /// sources per participant. Deliberately a separate field from `voice`
     /// above (which is pure presence tracking) to avoid conflating "who's

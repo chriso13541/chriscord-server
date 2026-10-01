@@ -124,6 +124,7 @@ async fn handle_socket(socket: WebSocket, token: String, initial_status: Option<
                                         // inserting simply overwrites any previous entry, so
                                         // moving between channels needs no separate leave step.
                                         { state.voice.lock().unwrap().insert(username.clone(), bid.clone()); }
+                                        { state.voice_reconnecting.lock().unwrap().remove(&username); } // back properly
                                         broadcast_voice_state(&state);
                                         let statuses: Vec<serde_json::Value> = {
                                             let voice = state.voice.lock().unwrap();
@@ -143,10 +144,16 @@ async fn handle_socket(socket: WebSocket, token: String, initial_status: Option<
                                 }
                             }
                             "leave_voice" => {
+                                // Also ends a "reconnecting" placeholder — a client that
+                                // dropped mid-call and then chose to hang up sends this
+                                // once it's back, so nobody waits for it to return.
+                                let was_reconnecting = { state.voice_reconnecting.lock().unwrap().remove(&username).is_some() };
                                 let left_board = { state.voice.lock().unwrap().remove(&username) };
                                 if let Some(bid) = left_board {
                                     { state.voice_status.lock().unwrap().remove(&username); }
                                     voice::close_participant(&state, &bid, &username).await;
+                                    broadcast_voice_state(&state);
+                                } else if was_reconnecting {
                                     broadcast_voice_state(&state);
                                 }
                             }
@@ -367,14 +374,29 @@ async fn handle_socket(socket: WebSocket, token: String, initial_status: Option<
     }
     broadcast_users(&state);
 
-    // A dropped connection is an implicit leave from voice too — otherwise a
-    // crashed or closed client leaves a ghost entry showing them still "in"
-    // the channel forever.
+    // A dropped connection ends their audio — but rather than vanishing
+    // from the channel (which looks like they left), they stay listed as
+    // "reconnecting" for VOICE_REJOIN_GRACE, since the app rejoins on its
+    // own when it gets back. If it doesn't come back in time, they're
+    // removed then. (A client closed on purpose looks the same from here,
+    // so it just lingers faded for the grace period.)
     let left_board = { state.voice.lock().unwrap().remove(&username) };
     if let Some(bid) = left_board {
         { state.voice_status.lock().unwrap().remove(&username); }
         voice::close_participant(&state, &bid, &username).await;
+        let drop_id = NEXT_DROP_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        { state.voice_reconnecting.lock().unwrap().insert(username.clone(), (bid, drop_id)); }
         broadcast_voice_state(&state);
+        let st = Arc::clone(&state);
+        let user = username.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(VOICE_REJOIN_GRACE).await;
+            let expired = {
+                let mut r = st.voice_reconnecting.lock().unwrap();
+                if r.get(&user).map(|(_, id)| *id) == Some(drop_id) { r.remove(&user); true } else { false }
+            };
+            if expired { broadcast_voice_state(&st); }
+        });
     }
 }
 
@@ -391,16 +413,22 @@ pub fn send_to_user(state: &Arc<AppState>, target_username: &str, mut payload: s
     let _ = state.tx.send(payload.to_string());
 }
 
+/// How long someone whose connection dropped mid-call stays listed as
+/// "reconnecting" before they're taken out of the channel.
+const VOICE_REJOIN_GRACE: std::time::Duration = std::time::Duration::from_secs(60);
+static NEXT_DROP_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
 fn broadcast_voice_state(state: &Arc<AppState>) {
-    let channels: std::collections::HashMap<String, Vec<String>> = {
-        let voice = state.voice.lock().unwrap();
+    let group = |pairs: Vec<(String, String)>| {
         let mut m: std::collections::HashMap<String, Vec<String>> = std::collections::HashMap::new();
-        for (user, board) in voice.iter() {
-            m.entry(board.clone()).or_default().push(user.clone());
-        }
+        for (user, board) in pairs { m.entry(board).or_default().push(user); }
         m
     };
-    let _ = state.tx.send(serde_json::json!({ "type": "voice_state", "channels": channels }).to_string());
+    let channels = group(state.voice.lock().unwrap().iter().map(|(u, b)| (u.clone(), b.clone())).collect());
+    // Separate from channels so older clients (which don't know about it)
+    // simply don't show the placeholder.
+    let reconnecting = group(state.voice_reconnecting.lock().unwrap().iter().map(|(u, (b, _))| (u.clone(), b.clone())).collect());
+    let _ = state.tx.send(serde_json::json!({ "type": "voice_state", "channels": channels, "reconnecting": reconnecting }).to_string());
 }
 
 /// Sends everyone the member list: who's online (invisible people are
