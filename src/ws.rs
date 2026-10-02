@@ -125,10 +125,23 @@ async fn handle_socket(socket: WebSocket, token: String, initial_status: Option<
                                 if let Some(bid) = cm.board_id {
                                     let content     = cm.content.as_deref().unwrap_or("").trim().to_string();
                                     let attachments = cm.attachments.unwrap_or_default();
-                                    if !content.is_empty() || !attachments.is_empty() {
+                                    let perms = crate::roles::permissions_of(&state.pool, &username).await;
+                                    let denied = if perms & crate::roles::SEND_MESSAGES == 0 { Some("send messages") }
+                                        else if !attachments.is_empty() && perms & crate::roles::ATTACH_FILES == 0 { Some("attach files") }
+                                        else { None };
+                                    if let Some(what) = denied {
+                                        send_to_user(&state, &username, serde_json::json!({
+                                            "type": "action_denied", "message": format!("You don't have permission to {what} on this server"),
+                                        }));
+                                    } else if !content.is_empty() || !attachments.is_empty() {
                                         save_and_broadcast(&state, &bid, &username, &content, attachments).await;
                                     }
                                 }
+                            }
+                            "join_voice" if !crate::roles::has(&state.pool, &username, crate::roles::CONNECT).await => {
+                                send_to_user(&state, &username, serde_json::json!({
+                                    "type": "action_denied", "message": "You don't have permission to join voice channels on this server",
+                                }));
                             }
                             "join_voice" => {
                                 if let Some(bid) = cm.board_id {
@@ -379,6 +392,8 @@ async fn handle_socket(socket: WebSocket, token: String, initial_status: Option<
                                 Some("typing") => v["username"].as_str() != Some(username.as_str()),
                                 Some("rooms_updated") => true,
                                 Some("voice_state") => true,
+                                Some("roles_updated") => true,
+                                Some("action_denied") => v["target"].as_str() == Some(username.as_str()),
                                 // Speaking rings are only for people in that same call —
                                 // someone just browsing the server still gets voice_state
                                 // (who's in which channel) but no activity.

@@ -10,6 +10,7 @@ mod rooms;
 mod state;
 mod utils;
 mod voice;
+mod roles;
 mod ws;
 
 use axum::{
@@ -30,6 +31,7 @@ async fn main() {
 
     let pool = db::init().await.expect("Failed to initialize database");
     pfp::migrate_to_key_names(&pool).await; // pfps/<username>.* → pfps/<public key>.*
+    roles::init(&pool).await.expect("Failed to set up roles");
 
     let owner_key =
         db::get_or_create_config(&pool, "owner_key", || utils::generate_hex(32))
@@ -77,6 +79,12 @@ async fn main() {
         .route("/api/admin/members",    get(admin::list_members))
         .route("/api/admin/members/:username/kick", post(admin::kick_member))
         .route("/api/admin/owner",      post(admin::set_owner))
+        .route("/api/admin/roles",      get(roles::admin_list).post(roles::admin_create))
+        .route("/api/admin/roles/order", post(roles::admin_order))
+        .route("/api/admin/roles/:id",  put(roles::admin_update).delete(roles::admin_delete))
+        .route("/api/admin/members/:username/roles", put(roles::admin_set_member_roles))
+        .route("/api/roles",            get(roles::get_roles))
+        .route("/api/members/:username/kick", post(roles::kick_member))
         .route("/api/admin/bans",       get(admin::list_bans))
         .route("/api/admin/bans/:public_key", delete(admin::unban))
         .route("/api/server/banner",    get(admin::serve_banner))

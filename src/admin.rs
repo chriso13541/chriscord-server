@@ -114,7 +114,7 @@ fn owner_key_from(h: &HeaderMap) -> &str {
 /// Every /api/admin route requires the owner key (printed in the server's
 /// console at startup). Compared in constant time so response timing can't
 /// be used to guess it a character at a time.
-fn check_owner(h: &HeaderMap, state: &AppState) -> Result<(), ApiErr> {
+pub(crate) fn check_owner(h: &HeaderMap, state: &AppState) -> Result<(), ApiErr> {
     let given = owner_key_from(h).as_bytes();
     let want = state.owner_key.as_bytes();
     let mut diff = (given.len() ^ want.len()) as u8;
@@ -683,11 +683,21 @@ pub async fn kick_member(
     Json(body): Json<KickReq>,
 ) -> Result<Json<serde_json::Value>, ApiErr> {
     check_owner(&headers, &s)?;
-    let row = sqlx::query("SELECT public_key FROM users WHERE username = ?").bind(&username)
+    kick_user(&s, &username, body.ban, &body.reason).await?;
+    tracing::info!("admin: {} {username}", if body.ban { "banned" } else { "kicked" });
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+/// Kicks (or bans) a member — shared by the admin panel and members whose
+/// roles allow kicking/banning (see roles::kick_member).
+pub(crate) async fn kick_user(s: &Arc<AppState>, username: &str, ban: bool, reason: &str) -> Result<(), ApiErr> {
+    let row = sqlx::query("SELECT public_key FROM users WHERE username = ?").bind(username)
         .fetch_optional(&s.pool).await.map_err(|_| dberr())?
         .ok_or_else(|| bad("No member with that username"))?;
     let public_key: String = row.get("public_key");
-    let reason: String = body.reason.trim().chars().take(200).collect();
+    let reason: String = reason.trim().chars().take(200).collect();
+    let body = KickReq { ban, reason: reason.clone() };
+    let username = username.to_string();
 
     if body.ban {
         sqlx::query("INSERT OR REPLACE INTO bans (public_key, username, reason, banned_at) VALUES (?, ?, ?, ?)")
@@ -700,12 +710,14 @@ pub async fn kick_member(
         let _ = db::set_config(&s.pool, "owner_username", "").await;
     }
     // Their open connections see this, pass it to the client, and close.
-    crate::ws::send_to_user(&s, &username, serde_json::json!({
+    // A kick takes their roles too (as on Discord); they rejoin with none.
+    let _ = sqlx::query("DELETE FROM member_roles WHERE public_key = ?").bind(&public_key).execute(&s.pool).await;
+    crate::ws::send_to_user(s, &username, serde_json::json!({
         "type": "kicked", "banned": body.ban, "reason": reason,
     }));
-    crate::ws::broadcast_users(&s);
-    tracing::info!("admin: {} {username}", if body.ban { "banned" } else { "kicked" });
-    Ok(Json(serde_json::json!({ "ok": true })))
+    crate::ws::broadcast_users(s);
+    let _ = s.tx.send(serde_json::json!({ "type": "roles_updated" }).to_string());
+    Ok(())
 }
 
 /// GET /api/admin/bans

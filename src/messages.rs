@@ -412,6 +412,10 @@ pub async fn post_message(
 
     let content     = body.content.as_deref().unwrap_or("").trim().to_string();
     let attachments = body.attachments.unwrap_or_default();
+    crate::roles::require(&s.pool, &username, crate::roles::SEND_MESSAGES, "send messages").await?;
+    if !attachments.is_empty() {
+        crate::roles::require(&s.pool, &username, crate::roles::ATTACH_FILES, "attach files").await?;
+    }
 
     if content.is_empty() && attachments.is_empty() {
         return Err((StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": "Must have content or attachment" }))));
@@ -485,7 +489,10 @@ pub async fn delete_message(
         .bind(&id).fetch_optional(&s.pool).await.map_err(|_| db_err())?
         .ok_or_else(not_found)?;
 
-    if row.get::<String, _>("username") != username { return Err(forbidden()); }
+    // Your own messages, or anyone's with Manage Messages.
+    if row.get::<String, _>("username") != username && !crate::roles::has(&s.pool, &username, crate::roles::MANAGE_MESSAGES).await {
+        return Err(forbidden());
+    }
     let board_id: String = row.get("board_id");
 
     sqlx::query("DELETE FROM messages WHERE id = ?").bind(&id).execute(&s.pool).await.map_err(|_| db_err())?;
@@ -543,6 +550,10 @@ pub async fn unpin_message(
 async fn set_pinned(s: &AppState, headers: &HeaderMap, id: &str, pinned: bool) -> Result<Json<serde_json::Value>, ApiErr> {
     let username = db::verify_token(&s.pool, token_from(headers)).await
         .map_err(|_| db_err())?.ok_or_else(unauth)?;
+    if !crate::roles::has(&s.pool, &username, crate::roles::PIN_MESSAGES).await
+        && !crate::roles::has(&s.pool, &username, crate::roles::MANAGE_MESSAGES).await {
+        return Err((StatusCode::FORBIDDEN, Json(serde_json::json!({ "error": "You don't have permission to pin messages on this server" }))));
+    }
     let row = sqlx::query("SELECT board_id FROM messages WHERE id = ?")
         .bind(id).fetch_optional(&s.pool).await.map_err(|_| db_err())?
         .ok_or_else(not_found)?;
@@ -629,6 +640,9 @@ pub async fn react(
 ) -> Result<Json<serde_json::Value>, ApiErr> {
     let username = db::verify_token(&s.pool, token_from(&headers)).await
         .map_err(|_| db_err())?.ok_or_else(unauth)?;
+    if body.on { // taking your own reaction back is always allowed
+        crate::roles::require(&s.pool, &username, crate::roles::ADD_REACTIONS, "add reactions").await?;
+    }
     let emoji = body.emoji.trim().to_string();
     if !valid_reaction_emoji(&emoji) {
         return Err((StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": "Not a valid reaction" }))));

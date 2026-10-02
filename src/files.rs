@@ -37,9 +37,10 @@ pub async fn upload(
     State(s):      State<Arc<AppState>>,
     mut multipart: Multipart,
 ) -> Result<Json<UploadResp>, ApiErr> {
-    db::verify_token(&s.pool, token_from(&headers))
+    let username = db::verify_token(&s.pool, token_from(&headers))
         .await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "DB error"))?
         .ok_or_else(|| err(StatusCode::UNAUTHORIZED, "Unauthorized"))?;
+    crate::roles::require(&s.pool, &username, crate::roles::ATTACH_FILES, "attach files").await?;
 
     tokio::fs::create_dir_all(UPLOAD_DIR)
         .await
