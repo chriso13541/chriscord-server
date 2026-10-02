@@ -145,6 +145,11 @@ async fn handle_socket(socket: WebSocket, token: String, initial_status: Option<
                                         // moving between channels needs no separate leave step.
                                         { state.voice.lock().unwrap().insert(username.clone(), bid.clone()); }
                                         { state.voice_reconnecting.lock().unwrap().remove(&username); } // back properly
+                                        // Mute/deafen start as whatever the app says it is right
+                                        // now — never carried over from an earlier session, which
+                                        // is how someone could show as muted while talking.
+                                        { state.voice_status.lock().unwrap().insert(username.clone(),
+                                            (cm.muted.unwrap_or(false), cm.deafened.unwrap_or(false))); }
                                         broadcast_voice_state(&state);
                                         let statuses: Vec<serde_json::Value> = {
                                             let voice = state.voice.lock().unwrap();
@@ -458,7 +463,20 @@ fn broadcast_voice_state(state: &Arc<AppState>) {
     // Separate from channels so older clients (which don't know about it)
     // simply don't show the placeholder.
     let reconnecting = group(state.voice_reconnecting.lock().unwrap().iter().map(|(u, (b, _))| (u.clone(), b.clone())).collect());
-    let _ = state.tx.send(serde_json::json!({ "type": "voice_state", "channels": channels, "reconnecting": reconnecting }).to_string());
+    // Everyone's current mute/deafen, sent with every update so every app —
+    // including ones that just connected and aren't in a call — always has
+    // the real state, and anything stale is replaced rather than lingering.
+    let mute_states: serde_json::Map<String, serde_json::Value> = {
+        let voice = state.voice.lock().unwrap();
+        let status = state.voice_status.lock().unwrap();
+        voice.keys().map(|u| {
+            let (muted, deafened) = status.get(u).copied().unwrap_or((false, false));
+            (u.clone(), serde_json::json!({ "muted": muted, "deafened": deafened }))
+        }).collect()
+    };
+    let _ = state.tx.send(serde_json::json!({
+        "type": "voice_state", "channels": channels, "reconnecting": reconnecting, "mute_states": mute_states,
+    }).to_string());
 }
 
 /// Sends everyone the member list: who's online (invisible people are
