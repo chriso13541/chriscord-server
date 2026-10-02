@@ -81,6 +81,7 @@ async fn handle_socket(socket: WebSocket, token: String, initial_status: Option<
     broadcast_voice_state(&state);
 
     let mut subscribed_board: Option<String> = None;
+    let conn_id = NEXT_CONN_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let (mut sink, mut stream) = socket.split();
 
     // Heartbeat: ping every WS_PING_EVERY; anything received (a message, a
@@ -140,6 +141,18 @@ async fn handle_socket(socket: WebSocket, token: String, initial_status: Option<
                                     ).bind(&bid).fetch_optional(&state.pool).await.ok().flatten()
                                      .map(|r| r.get("room_type"));
                                     if room_type.as_deref() == Some("voice") {
+                                        // Already in a call on another device? Move it here: that
+                                        // device is told to hang up, and its audio is closed.
+                                        let prev = voice_owner(&username).filter(|o| *o != conn_id);
+                                        let prev_board = { state.voice.lock().unwrap().get(&username).cloned() };
+                                        if let (Some(old_conn), Some(old_bid)) = (prev, prev_board) {
+                                            voice::close_participant(&state, &old_bid, &username).await;
+                                            let _ = state.tx.send(serde_json::json!({
+                                                "type": "voice_moved", "target": username, "target_conn": old_conn, "board_id": old_bid,
+                                            }).to_string());
+                                            tracing::info!("voice: {username}'s call moved to another device");
+                                        }
+                                        { voice_owners().lock().unwrap().insert(username.clone(), conn_id); }
                                         // A user can only be in one voice channel at a time —
                                         // inserting simply overwrites any previous entry, so
                                         // moving between channels needs no separate leave step.
@@ -168,7 +181,13 @@ async fn handle_socket(socket: WebSocket, token: String, initial_status: Option<
                                     }
                                 }
                             }
+                            "leave_voice" if !may_control_voice(&username, conn_id) => {
+                                // Another device of this account is the one in the call —
+                                // this one can't hang it up (e.g. a second device starting
+                                // up and tidying what looks like a leftover call).
+                            }
                             "leave_voice" => {
+                                { voice_owners().lock().unwrap().remove(&username); }
                                 // Also ends a "reconnecting" placeholder — a client that
                                 // dropped mid-call and then chose to hang up sends this
                                 // once it's back, so nobody waits for it to return.
@@ -182,6 +201,7 @@ async fn handle_socket(socket: WebSocket, token: String, initial_status: Option<
                                     broadcast_voice_state(&state);
                                 }
                             }
+                            "voice_offer" if !may_control_voice(&username, conn_id) => {}
                             "voice_offer" => {
                                 if let (Some(bid), Some(sdp)) = (cm.board_id, cm.sdp) {
                                     let others: Vec<String> = {
@@ -202,6 +222,7 @@ async fn handle_socket(socket: WebSocket, token: String, initial_status: Option<
                                     }
                                 }
                             }
+                            "voice_ice" if !may_control_voice(&username, conn_id) => {}
                             "voice_ice" => {
                                 if let (Some(bid), Some(candidate)) = (cm.board_id, cm.candidate) {
                                     let init = webrtc::ice_transport::ice_candidate::RTCIceCandidateInit {
@@ -213,11 +234,13 @@ async fn handle_socket(socket: WebSocket, token: String, initial_status: Option<
                                     voice::handle_ice_candidate(&state, &bid, &username, init).await;
                                 }
                             }
+                            "voice_renegotiate_answer" if !may_control_voice(&username, conn_id) => {}
                             "voice_renegotiate_answer" => {
                                 if let (Some(bid), Some(sdp)) = (cm.board_id, cm.sdp) {
                                     voice::handle_renegotiate_answer(&state, &bid, &username, &sdp).await;
                                 }
                             }
+                            "speaking" if !may_control_voice(&username, conn_id) => {}
                             "speaking" => {
                                 if let (Some(bid), Some(speaking)) = (cm.board_id, cm.speaking) {
                                     // Only meaningful if they're actually still in this voice
@@ -235,6 +258,7 @@ async fn handle_socket(socket: WebSocket, token: String, initial_status: Option<
                                     }
                                 }
                             }
+                            "voice_mute_state" if !may_control_voice(&username, conn_id) => {}
                             "voice_mute_state" => {
                                 if let Some(bid) = cm.board_id {
                                     let in_channel = { state.voice.lock().unwrap().get(&username) == Some(&bid) };
@@ -361,14 +385,18 @@ async fn handle_socket(socket: WebSocket, token: String, initial_status: Option<
                                 Some("voice_speaking") => {
                                     let my_board = state.voice.lock().unwrap().get(&username).cloned();
                                     my_board.as_deref().is_some() && v["board_id"].as_str() == my_board.as_deref()
+                                        && voice_owner(&username) == Some(conn_id) // not your other devices
                                 }
+                                Some("voice_moved") => v["target"].as_str() == Some(username.as_str()) && v["target_conn"].as_u64() == Some(conn_id),
                                 Some("voice_mute_state") => true,
                                 Some("pfp_updated") | Some("profile_updated") => true,
                                 Some("message") => true,
                                 Some("message_edit") | Some("message_delete") | Some("message_pin") | Some("message_reaction") => subscribed_board.as_deref()
                                     .map(|bid| v["board_id"].as_str() == Some(bid))
                                     .unwrap_or(false),
-                                Some("voice_answer") | Some("voice_ice") | Some("voice_status_snapshot") | Some("voice_renegotiate") | Some("pfp_request") | Some("profile_request") =>
+                                Some("voice_answer") | Some("voice_ice") | Some("voice_status_snapshot") | Some("voice_renegotiate") =>
+                                    v["target"].as_str() == Some(username.as_str()) && may_control_voice(&username, conn_id),
+                                Some("pfp_request") | Some("profile_request") =>
                                     v["target"].as_str() == Some(username.as_str()),
                                 _ => false,
                             };
@@ -406,7 +434,11 @@ async fn handle_socket(socket: WebSocket, token: String, initial_status: Option<
     // own when it gets back. If it doesn't come back in time, they're
     // removed then. A client that closed on purpose (quit, or left the
     // server) sends a close frame first, and is removed straight away.
-    let left_board = { state.voice.lock().unwrap().remove(&username) };
+    // Only if this connection is the device in the call — closing the
+    // laptop mustn't hang up the PC.
+    let owned = voice_owner(&username) == Some(conn_id);
+    if owned { voice_owners().lock().unwrap().remove(&username); }
+    let left_board = if owned { state.voice.lock().unwrap().remove(&username) } else { None };
     if let Some(bid) = left_board.clone().filter(|_| closed_on_purpose) {
         // Left on purpose (the app sent a close frame): out of the call now.
         { state.voice_status.lock().unwrap().remove(&username); }
@@ -452,6 +484,25 @@ const VOICE_REJOIN_GRACE: std::time::Duration = std::time::Duration::from_secs(6
 const WS_PING_EVERY: std::time::Duration = std::time::Duration::from_secs(20);
 const WS_DEAD_AFTER: std::time::Duration = std::time::Duration::from_secs(50);
 static NEXT_DROP_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+// ── One device per call ──────────────────────────────────────────────────────
+//
+// The same account can be signed in on several devices at once (PC and
+// laptop), each with its own connection. Voice is per account, so exactly
+// one of those connections — the "voice owner" — is the one actually in
+// the call. Only it gets the call's signalling and speaking activity, only
+// it can change the call (mute, leave…), and only its disconnecting takes
+// the account out. Joining from another device moves the call there: the
+// old device is told ("voice_moved") and hangs up.
+static NEXT_CONN_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+fn voice_owners() -> &'static std::sync::Mutex<std::collections::HashMap<String, u64>> {
+    static OWNERS: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, u64>>> = std::sync::OnceLock::new();
+    OWNERS.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+fn voice_owner(user: &str) -> Option<u64> { voice_owners().lock().unwrap().get(user).copied() }
+/// True if this connection may act on the account's call: it's the owner,
+/// or nobody owns it right now.
+fn may_control_voice(user: &str, conn: u64) -> bool { voice_owner(user).map_or(true, |o| o == conn) }
 
 fn broadcast_voice_state(state: &Arc<AppState>) {
     let group = |pairs: Vec<(String, String)>| {
