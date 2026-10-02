@@ -352,6 +352,58 @@ pub async fn delete_board(
 
 const BANNER_MAX_BYTES: usize = 8 << 20;
 
+// ── Storage ─────────────────────────────────────────────────────────────────
+
+/// Total size and number of files under a directory (0 if it doesn't exist).
+fn dir_usage(path: &std::path::Path) -> (u64, u64) {
+    let mut bytes = 0u64;
+    let mut files = 0u64;
+    let mut stack = vec![path.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else { continue };
+        for e in entries.flatten() {
+            let Ok(meta) = e.metadata() else { continue };
+            if meta.is_dir() { stack.push(e.path()); } else { bytes += meta.len(); files += 1; }
+        }
+    }
+    (bytes, files)
+}
+
+/// Size and free space of the disk the server runs from, via `df` (POSIX,
+/// so Linux/macOS/BSD). None if that isn't available.
+fn disk_usage() -> Option<(u64, u64)> {
+    let out = std::process::Command::new("df").args(["-Pk", "."]).output().ok()?;
+    let text = String::from_utf8(out.stdout).ok()?;
+    let line = text.lines().nth(1)?;
+    let cols: Vec<&str> = line.split_whitespace().collect();
+    let total: u64 = cols.get(1)?.parse().ok()?;
+    let avail: u64 = cols.get(3)?.parse().ok()?;
+    Some((total * 1024, avail * 1024))
+}
+
+/// GET /api/admin/storage — what the server's files take up, by kind, and
+/// how full the disk is.
+pub async fn storage(headers: HeaderMap, State(s): State<Arc<AppState>>) -> Result<Json<serde_json::Value>, ApiErr> {
+    check_owner(&headers, &s)?;
+    let result = tokio::task::spawn_blocking(|| {
+        let (up_b, up_n) = dir_usage(std::path::Path::new("./uploads"));
+        let (pf_b, pf_n) = dir_usage(std::path::Path::new("./pfps"));
+        let (as_b, as_n) = dir_usage(std::path::Path::new("./server_assets"));
+        let db_b: u64 = ["./chriscord.db", "./chriscord.db-wal", "./chriscord.db-shm"].iter()
+            .filter_map(|p| std::fs::metadata(p).ok()).map(|m| m.len()).sum();
+        let disk = disk_usage().map(|(total, free)| serde_json::json!({ "total": total, "free": free }));
+        serde_json::json!({
+            "uploads":  { "bytes": up_b, "files": up_n },
+            "profiles": { "bytes": pf_b, "files": pf_n },
+            "assets":   { "bytes": as_b, "files": as_n },
+            "database": { "bytes": db_b },
+            "total": up_b + pf_b + as_b + db_b,
+            "disk": disk,
+        })
+    }).await.map_err(|_| dberr())?;
+    Ok(Json(result))
+}
+
 fn server_assets_dir() -> std::path::PathBuf {
     let dir = std::path::PathBuf::from("./server_assets");
     let _ = std::fs::create_dir_all(&dir);

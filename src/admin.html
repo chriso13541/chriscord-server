@@ -16,6 +16,26 @@
   button { font:inherit; border:none; border-radius:6px; padding:8px 14px; background:var(--accent); color:#fff; cursor:pointer; display:inline-flex; align-items:center; gap:6px; }
   button:hover { filter:brightness(1.12); }
   button:disabled { opacity:.5; cursor:default; filter:none; }
+  /* Save buttons (see makeSaver): grey until there's something to save */
+  button.save-btn { min-width:128px; justify-content:center; transition:background .2s, opacity .2s, transform .1s; }
+  button.save-btn:active:not(:disabled) { transform:scale(.97); }
+  button.save-btn.saved { background:var(--green); opacity:1; }
+  button.save-btn.saved .ic { animation:pop .35s cubic-bezier(.2,1.6,.4,1); }
+  @keyframes pop { from { transform:scale(0); } to { transform:none; } }
+  button.save-btn .spin { width:14px; height:14px; border:2px solid rgba(255,255,255,.35); border-top-color:#fff; border-radius:50%; animation:spin .7s linear infinite; }
+  @keyframes spin { to { transform:rotate(360deg); } }
+  .unsaved { display:inline-flex; align-items:center; gap:6px; color:var(--yellow); font-size:.85rem; }
+  .unsaved::before { content:''; width:7px; height:7px; border-radius:50%; background:var(--yellow); animation:breathe 1.6s ease-in-out infinite; }
+  @keyframes breathe { 50% { opacity:.35; } }
+  /* Storage */
+  .stor-bar { display:flex; height:14px; border-radius:7px; overflow:hidden; background:var(--surface2); margin:10px 0 14px; }
+  .stor-bar > i { display:block; height:100%; min-width:0; transition:width .4s ease; }
+  .stor-legend { display:grid; grid-template-columns:auto 1fr auto auto; gap:6px 12px; align-items:center; font-size:.88rem; }
+  .stor-legend .sw { width:10px; height:10px; border-radius:3px; }
+  .stor-legend .n { color:var(--muted); font-size:.8rem; text-align:right; }
+  .stor-legend .b { text-align:right; font-variant-numeric:tabular-nums; color:var(--strong); font-weight:600; }
+  .stor-total { display:flex; justify-content:space-between; align-items:baseline; gap:12px; flex-wrap:wrap; }
+  .stor-total b { font-size:1.3rem; color:var(--strong); }
   button.ghost { background:var(--surface2); color:var(--text); }
   button.danger { background:var(--red); }
   button.small { padding:5px 10px; font-size:.82rem; }
@@ -182,6 +202,7 @@
 <symbol id="i-shield_person" viewBox="0 -960 960 960"><path d="M480-440q-59 0-99.5-40.5T340-580q0-59 40.5-99.5T480-720q59 0 99.5 40.5T620-580q0 59-40.5 99.5T480-440Zm0-80q26 0 43-17t17-43q0-26-17-43t-43-17q-26 0-43 17t-17 43q0 26 17 43t43 17Zm0 440q-139-35-229.5-159.5T160-516v-244l320-120 320 120v244q0 152-90.5 276.5T480-80Zm0-400Zm0-315-240 90v189q0 54 15 105t41 96q42-21 88-33t96-12q50 0 96 12t88 33q26-45 41-96t15-105v-189l-240-90Zm0 515q-36 0-70 8t-65 22q29 30 63 52t72 34q38-12 72-34t63-52q-31-14-65-22t-70-8Z"/></symbol>
 <symbol id="i-arrow_upward" viewBox="0 -960 960 960"><path d="M440-160v-487L216-423l-56-57 320-320 320 320-56 57-224-224v487h-80Z"/></symbol>
 <symbol id="i-arrow_downward" viewBox="0 -960 960 960"><path d="M440-800v487L216-537l-56 57 320 320 320-320-56-57-224 224v-487h-80Z"/></symbol>
+<symbol id="i-refresh" viewBox="0 -960 960 960"><path d="M480-160q-134 0-227-93t-93-227q0-134 93-227t227-93q69 0 132 28.5T720-690v-110h80v280H520v-80h168q-32-56-87.5-88T480-720q-100 0-170 70t-70 170q0 100 70 170t170 70q77 0 139-44t87-116h84q-28 106-114 173t-196 67Z"/></symbol>
 <symbol id="i-dashboard" viewBox="0 -960 960 960"><path d="M520-600v-240h320v240H520ZM120-440v-400h320v400H120Zm400 320v-400h320v400H520Zm-400 0v-240h320v240H120Zm80-400h160v-240H200v240Zm400 320h160v-240H600v240Zm0-480h160v-80H600v80ZM200-200h160v-80H200v80Zm160-320Zm240-160Zm0 240ZM360-280Z"/></symbol>
 <symbol id="i-palette" viewBox="0 -960 960 960"><path d="M480-80q-82 0-155-31.5t-127.5-86Q143-252 111.5-325T80-480q0-83 32.5-156t88-127Q256-817 330-848.5T488-880q80 0 151 27.5t124.5 76q53.5 48.5 85 115T880-518q0 115-70 176.5T640-280h-74q-9 0-12.5 5t-3.5 11q0 12 15 34.5t15 51.5q0 50-27.5 74T480-80Zm0-400Zm-220 40q26 0 43-17t17-43q0-26-17-43t-43-17q-26 0-43 17t-17 43q0 26 17 43t43 17Zm120-160q26 0 43-17t17-43q0-26-17-43t-43-17q-26 0-43 17t-17 43q0 26 17 43t43 17Zm200 0q26 0 43-17t17-43q0-26-17-43t-43-17q-26 0-43 17t-17 43q0 26 17 43t43 17Zm120 160q26 0 43-17t17-43q0-26-17-43t-43-17q-26 0-43 17t-17 43q0 26 17 43t43 17ZM480-160q9 0 14.5-5t5.5-13q0-14-15-33t-15-57q0-42 29-67t71-25h70q66 0 113-38.5T800-518q0-121-92.5-201.5T488-800q-136 0-232 93t-96 227q0 133 93.5 226.5T480-160Z"/></symbol>
 <symbol id="i-upload" viewBox="0 -960 960 960"><path d="M440-320v-326L336-542l-56-58 200-200 200 200-56 58-104-104v326h-80ZM240-160q-33 0-56.5-23.5T160-240v-120h80v120h480v-120h80v120q0 33-23.5 56.5T720-160H240Z"/></symbol>
@@ -351,6 +372,10 @@
           Keep an eye on free disk space on the server — uploads are stored in <code>./uploads</code>.</p>
         <div class="row" style="margin-top:12px"><button id="uploads-save">Save</button><span class="msg" id="uploads-msg"></span></div>
       </div>
+      <div class="card">
+        <div class="stor-total"><h3 style="margin:0">Storage</h3><button class="ghost small" id="stor-refresh"><svg class="ic"><use href="#i-refresh"/></svg>Refresh</button></div>
+        <div id="storage"><p class="hint">Working it out…</p></div>
+      </div>
     </section>
 
     <!-- Channels -->
@@ -434,6 +459,80 @@ function toast(text, err = false) { const t = $('toast'); t.textContent = text; 
 function colour(name) { let h = 0; for (const c of name) h = (h * 31 + c.charCodeAt(0)) >>> 0; return `hsl(${h % 360} 45% 45%)`; }
 function fmtDate(iso) { try { return new Date(iso).toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' }); } catch { return ''; } }
 
+// ── Save buttons ─────────────────────────────────────────────────────
+// Every Save button behaves the same way so it's always clear whether
+// your changes are saved:
+//   nothing changed  → grey "Saved"/"Save", can't be clicked
+//   something changed → "Save changes" lights up, with a pulsing
+//                       "Unsaved changes" beside it
+//   saving           → a spinner
+//   done             → turns green with a tick, then settles back to grey
+// `area` is where the inputs live (any input/change inside counts),
+// `read` turns the current values into something comparable, and
+// `save` does the work (throw to report a problem).
+function makeSaver({ btn, msg, area, read, save }) {
+  btn.classList.add('save-btn');
+  let base = read(), busy = false, doneTimer = null, savedOnce = false;
+  const dirty = () => base !== null && read() !== base;
+  const paint = () => {
+    if (busy) return;
+    const d = dirty();
+    btn.disabled = !d;
+    // Grey "Save" to start with; after a save it stays a grey "Saved" until you change something.
+    if (!btn.classList.contains('saved')) btn.innerHTML = d ? 'Save changes' : savedOnce ? `${icon('check')}Saved` : 'Save';
+    if (d) { msg.className = 'unsaved'; msg.textContent = 'Unsaved changes'; }
+    else if (msg.className === 'unsaved') { msg.className = 'msg'; msg.textContent = ''; }
+  };
+  const reset = () => { base = read(); savedOnce = false; btn.classList.remove('saved'); paint(); };
+  area.addEventListener('input', paint);
+  area.addEventListener('change', paint);
+  btn.onclick = async () => {
+    if (busy || !dirty()) return;
+    busy = true; btn.disabled = true; clearTimeout(doneTimer);
+    btn.innerHTML = '<span class="spin"></span>Saving…';
+    msg.className = 'msg'; msg.textContent = '';
+    try {
+      await save();
+      busy = false; base = read(); savedOnce = true;
+      btn.classList.add('saved'); btn.innerHTML = `${icon('check')}Saved`; btn.disabled = true;
+      doneTimer = setTimeout(() => { btn.classList.remove('saved'); paint(); }, 1600);
+    } catch (e) {
+      busy = false; btn.disabled = false; btn.textContent = 'Save changes';
+      msg.className = 'msg err'; msg.textContent = e.message || String(e);
+    }
+  };
+  paint();
+  return { reset, paint };
+}
+// Values set from code (Generate, preset buttons…) count as changes too.
+function setValue(el, v) { el.value = v; el.dispatchEvent(new Event('input', { bubbles: true })); }
+
+// ── Storage ──────────────────────────────────────────────────────────
+const fmtBytes = b => { if (b < 1024) return b + ' B'; const u = ['KB', 'MB', 'GB', 'TB']; let i = -1; do { b /= 1024; i++; } while (b >= 1024 && i < u.length - 1); return (b >= 100 ? b.toFixed(0) : b >= 10 ? b.toFixed(1) : b.toFixed(2)) + ' ' + u[i]; };
+async function loadStorage() {
+  const el = $('storage');
+  let d; try { d = await api('/api/admin/storage'); } catch (e) { el.innerHTML = `<p class="msg err">${esc(e.message)}</p>`; return; }
+  const parts = [
+    ['Uploaded files', d.uploads.bytes, `${d.uploads.files} file${d.uploads.files === 1 ? '' : 's'}`, 'var(--accent)'],
+    ['Profile pictures, banners & bios', d.profiles.bytes, `${d.profiles.files} file${d.profiles.files === 1 ? '' : 's'}`, 'var(--green)'],
+    ['Server icon, banner & theme', d.assets.bytes, `${d.assets.files} file${d.assets.files === 1 ? '' : 's'}`, 'var(--yellow)'],
+    ['Message database', d.database.bytes, 'messages, members, roles…', '#b07cd8'],
+  ];
+  const disk = d.disk, scale = disk ? disk.total : Math.max(d.total, 1);
+  const other = disk ? Math.max(0, disk.total - disk.free - d.total) : 0;
+  const pct = b => (100 * b / scale) + '%';
+  el.innerHTML = `
+    <div class="stor-total" style="margin-top:10px"><span><b>${fmtBytes(d.total)}</b> used by chriscord</span>
+      ${disk ? `<span class="hint" style="margin:0">${fmtBytes(disk.free)} free of ${fmtBytes(disk.total)} on this disk</span>` : ''}</div>
+    <div class="stor-bar" title="${disk ? 'The whole disk' : 'chriscord\u2019s files'}">
+      ${parts.map(p => `<i style="width:${pct(p[1])};${p[1] ? 'min-width:4px;' : ''}background:${p[3]}" title="${esc(p[0])}: ${fmtBytes(p[1])}"></i>`).join('')}
+      ${disk ? `<i style="width:${pct(other)};background:#4f545c" title="Everything else on the disk: ${fmtBytes(other)}"></i>` : ''}</div>
+    <div class="stor-legend">${parts.map(p => `<span class="sw" style="background:${p[3]}"></span><span>${esc(p[0])}</span><span class="n">${esc(p[2])}</span><span class="b">${fmtBytes(p[1])}</span>`).join('')}
+      ${disk ? `<span class="sw" style="background:#4f545c"></span><span>Everything else on the disk</span><span class="n"></span><span class="b">${fmtBytes(other)}</span>` : ''}</div>
+    ${disk && disk.free / disk.total < .1 ? '<p class="msg err" style="margin-top:12px">The disk is over 90% full — uploads may start failing.</p>' : ''}`;
+}
+$('stor-refresh').onclick = loadStorage;
+
 // ── Sign in / out ────────────────────────────────────────────────────
 async function signIn(key, remember) {
   KEY = key.trim();
@@ -458,6 +557,7 @@ document.querySelectorAll('nav a[data-sec]').forEach(a => a.onclick = () => {
   document.querySelectorAll('main section').forEach(s => s.classList.toggle('on', s.id === 'sec-' + a.dataset.sec));
   if (a.dataset.sec === 'members') loadMembers();
   if (a.dataset.sec === 'bans') loadBans();
+  if (a.dataset.sec === 'uploads') loadStorage();
   if (a.dataset.sec === 'roles') loadRoles();
 });
 
@@ -474,6 +574,9 @@ async function loadInfo() {
   $('cfg-name').value = info.server_name;
   $('cfg-desc').value = info.description || ''; updateDescCount();
   $('cfg-maxup').value = info.max_upload_mb;
+  // (These exist once the page has finished setting up; on the first load
+  // they take their starting point from the values filled in here.)
+  try { joinKeySaver.reset(); customSaver.reset(); uploadsSaver.reset(); } catch {}
   $('st-upload').textContent = info.max_upload_mb === 0 ? 'Unlimited' : info.max_upload_mb >= 1024 ? (info.max_upload_mb / 1024).toFixed(info.max_upload_mb % 1024 ? 1 : 0) + ' GB' : info.max_upload_mb + ' MB';
   $('bp-name').textContent = info.server_name;
   $('icon-demo-name').textContent = info.server_name;
@@ -489,23 +592,24 @@ async function showBanner() {
 }
 
 // ── Overview: join key ───────────────────────────────────────────────
-$('joinkey-save').onclick = async () => {
-  try { await api('/api/admin/settings', { json: { server_key: $('cfg-joinkey').value } }); flash('joinkey-msg', 'Saved'); }
-  catch (e) { flash('joinkey-msg', e.message, false); }
-};
-$('joinkey-gen').onclick = () => { const a = new Uint8Array(6); crypto.getRandomValues(a); $('cfg-joinkey').value = [...a].map(b => b.toString(16).padStart(2, '0')).join(''); };
+const joinKeySaver = makeSaver({ btn: $('joinkey-save'), msg: $('joinkey-msg'), area: $('cfg-joinkey').closest('.card'),
+  read: () => $('cfg-joinkey').value,
+  save: () => api('/api/admin/settings', { json: { server_key: $('cfg-joinkey').value } }) });
+$('joinkey-gen').onclick = () => { const a = new Uint8Array(6); crypto.getRandomValues(a); setValue($('cfg-joinkey'), [...a].map(b => b.toString(16).padStart(2, '0')).join('')); };
 $('joinkey-copy').onclick = () => navigator.clipboard.writeText($('cfg-joinkey').value).then(() => toast('Join key copied'));
 
 // ── Customization ────────────────────────────────────────────────────
 function updateDescCount() { $('desc-count').textContent = `${[...$('cfg-desc').value].length} / 300`; }
 $('cfg-desc').oninput = updateDescCount;
 $('cfg-name').oninput = () => { $('bp-name').textContent = $('cfg-name').value; $('icon-demo-name').textContent = $('cfg-name').value; showIcon(false); };
-$('custom-save').onclick = async () => {
-  const name = $('cfg-name').value.trim();
-  if (!name) return flash('custom-msg', 'The server needs a name', false);
-  try { await api('/api/admin/settings', { json: { server_name: name, description: $('cfg-desc').value } }); flash('custom-msg', 'Saved'); $('nav-server-name').textContent = name; }
-  catch (e) { flash('custom-msg', e.message, false); }
-};
+const customSaver = makeSaver({ btn: $('custom-save'), msg: $('custom-msg'), area: $('cfg-name').closest('.card'),
+  read: () => JSON.stringify([$('cfg-name').value, $('cfg-desc').value]),
+  save: async () => {
+    const name = $('cfg-name').value.trim();
+    if (!name) throw new Error('The server needs a name');
+    await api('/api/admin/settings', { json: { server_name: name, description: $('cfg-desc').value } });
+    $('nav-server-name').textContent = name;
+  } });
 $('banner-choose').onclick = () => $('banner-file').click();
 // The app draws the banner across its channel list header — 330×140 at
 // the default sidebar width — so the crop box uses that exact shape, and
@@ -746,13 +850,14 @@ $('th-img-remove').onclick = async () => {
 };
 
 // ── Uploads ──────────────────────────────────────────────────────────
-document.querySelectorAll('[data-mb]').forEach(b => b.onclick = () => $('cfg-maxup').value = b.dataset.mb);
-$('uploads-save').onclick = async () => {
-  const mb = parseInt($('cfg-maxup').value, 10);
-  if (!(mb >= 0 && mb <= 4096)) return flash('uploads-msg', 'Choose between 1 and 4096 MB, or 0 for unlimited', false);
-  try { await api('/api/admin/settings', { json: { max_upload_mb: mb } }); await loadInfo(); flash('uploads-msg', 'Saved'); }
-  catch (e) { flash('uploads-msg', e.message, false); }
-};
+document.querySelectorAll('[data-mb]').forEach(b => b.onclick = () => setValue($('cfg-maxup'), b.dataset.mb));
+const uploadsSaver = makeSaver({ btn: $('uploads-save'), msg: $('uploads-msg'), area: $('cfg-maxup').closest('.card'),
+  read: () => String(parseInt($('cfg-maxup').value, 10)),
+  save: async () => {
+    const mb = parseInt($('cfg-maxup').value, 10);
+    if (!(mb >= 0 && mb <= 4096)) throw new Error('Choose between 1 and 4096 MB, or 0 for unlimited');
+    await api('/api/admin/settings', { json: { max_upload_mb: mb } }); await loadInfo();
+  } });
 
 // ── Channels ─────────────────────────────────────────────────────────
 async function loadRooms() {
@@ -819,6 +924,10 @@ async function setMemberRoles(username, ids) {
 }
 async function loadRoles() {
   await loadRoleData();
+  refreshRoleList();
+  renderRoleEditor();
+}
+function refreshRoleList() {
   const el = $('role-list'); el.innerHTML = '';
   const count = id => Object.values(roleData.members).filter(ids => ids.includes(id)).length;
   const movable = roleData.roles.filter(r => !r.is_default);
@@ -835,7 +944,6 @@ async function loadRoles() {
     row.querySelector('[data-down]')?.addEventListener('click', e => { e.stopPropagation(); move(1); });
     el.appendChild(row);
   });
-  renderRoleEditor();
 }
 function renderRoleEditor() {
   const box = $('role-edit'), r = roleById(editingRole);
@@ -851,13 +959,17 @@ function renderRoleEditor() {
     <label class="f">Permissions</label>
     <div>${roleData.permissions.map(p => `<label class="perm"><input type="checkbox" data-bit="${p.bit}" ${(r.permissions & p.bit) ? 'checked' : ''}><div><b>${esc(p.name)}</b><span>${esc(p.about)}</span></div></label>`).join('')}</div>
     <div class="row" style="margin-top:16px"><button id="re-save">Save</button>${def ? '' : '<button class="danger" id="re-del">Delete role</button>'}<span class="msg" id="re-msg"></span></div>`;
-  $('re-save').onclick = async () => {
-    const perms = [...box.querySelectorAll('[data-bit]')].reduce((a, c) => c.checked ? a | +c.dataset.bit : a, 0);
-    const body = { permissions: perms };
-    if (!def) { body.name = $('re-name').value; body.color = $('re-nocolor').checked ? '' : $('re-color').value; body.hoist = $('re-hoist').checked; }
-    try { await api('/api/admin/roles/' + r.id, { method: 'PUT', json: body }); flash('re-msg', 'Saved'); await loadRoles(); }
-    catch (e) { flash('re-msg', e.message, false); }
+  const body = () => {
+    const b = { permissions: [...box.querySelectorAll('[data-bit]')].reduce((a, c) => c.checked ? a | +c.dataset.bit : a, 0) };
+    if (!def) { b.name = $('re-name').value; b.color = $('re-nocolor').checked ? '' : $('re-color').value; b.hoist = $('re-hoist').checked; }
+    return b;
   };
+  makeSaver({ btn: $('re-save'), msg: $('re-msg'), area: box, read: () => JSON.stringify(body()),
+    save: async () => {
+      await api('/api/admin/roles/' + r.id, { method: 'PUT', json: body() });
+      // Refresh the list on the left (name, colour) without redrawing this editor.
+      await loadRoleData(); refreshRoleList();
+    } }).reset();
   if (!def) {
     $('re-color').oninput = () => $('re-nocolor').checked = false;
     $('re-del').onclick = () => confirmBox(`Delete ${r.name}?`, 'Everyone who has it loses it. This can\u2019t be undone.', 'Delete', async () => {
