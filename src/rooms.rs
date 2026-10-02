@@ -55,13 +55,12 @@ pub async fn list_rooms(
     headers: HeaderMap,
     State(s): State<Arc<AppState>>,
 ) -> Result<Json<Vec<Room>>, ApiErr> {
-    if db::verify_token(&s.pool, token_from(&headers))
+    let username = db::verify_token(&s.pool, token_from(&headers))
         .await
         .map_err(|_| db_err())?
-        .is_none()
-    {
-        return Err(unauth());
-    }
+        .ok_or_else(unauth)?;
+    // Categories you can't see aren't listed at all.
+    let visible = crate::access::visible_for(&s.pool, &username).await;
 
     let rows = sqlx::query(
         "SELECT id, name, is_private, room_type FROM rooms ORDER BY created_at ASC",
@@ -72,6 +71,7 @@ pub async fn list_rooms(
 
     Ok(Json(
         rows.iter()
+            .filter(|r| visible.as_ref().map_or(true, |v| v.rooms.contains(&r.get::<String, _>("id"))))
             .map(|r| Room {
                 id:         r.get("id"),
                 name:       r.get("name"),
@@ -93,14 +93,14 @@ pub async fn list_boards(
     let owner_key = headers.get("X-Owner-Key").and_then(|v| v.to_str().ok()).unwrap_or("");
     let is_owner  = !owner_key.is_empty() && owner_key == s.owner_key;
 
+    // Members only get the channels they can see; the admin panel (owner key) gets all.
+    let mut visible = None;
     if !is_owner {
-        if db::verify_token(&s.pool, token)
+        let username = db::verify_token(&s.pool, token)
             .await
             .map_err(|_| db_err())?
-            .is_none()
-        {
-            return Err(unauth());
-        }
+            .ok_or_else(unauth)?;
+        visible = crate::access::visible_for(&s.pool, &username).await;
     }
 
     let rows = sqlx::query(
@@ -113,6 +113,7 @@ pub async fn list_boards(
 
     Ok(Json(
         rows.iter()
+            .filter(|r| visible.as_ref().map_or(true, |v| v.boards.contains(&r.get::<String, _>("id"))))
             .map(|r| Board {
                 id:      r.get("id"),
                 room_id: r.get("room_id"),

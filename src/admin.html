@@ -115,6 +115,17 @@
   .dot { display:inline-block; width:8px; height:8px; border-radius:50%; margin-right:6px; background:var(--muted); }
   .dot.online { background:var(--green); } .dot.idle { background:var(--yellow); }
   .acts { display:flex; gap:6px; justify-content:flex-end; flex-wrap:wrap; }
+  /* channel access */
+  .access { display:flex; align-items:center; gap:8px; flex-wrap:wrap; margin:8px 0 2px; font-size:.85rem; color:var(--muted); }
+  .access select { width:auto; padding:4px 8px; font-size:.82rem; }
+  .access .saved-tick { color:var(--green); display:inline-flex; align-items:center; gap:3px; opacity:0; transition:opacity .2s; }
+  .access .saved-tick.on { opacity:1; }
+  .chip.locked { outline:1px solid var(--yellow); }
+  .chip .lock { padding:0 2px; background:none; color:var(--muted); } .chip .lock:hover { color:var(--text); }
+  .chip.locked .lock { color:var(--yellow); }
+  .board-access.hidden { display:none; }
+  .board-access { margin-top:8px; padding:10px 12px; border-radius:8px; background:var(--surface2); }
+  .board-access b { color:var(--strong); }
   /* roles */
   .roles-wrap { display:flex; gap:18px; align-items:flex-start; flex-wrap:wrap; }
   .roles-list { width:260px; flex-shrink:0; padding:10px; }
@@ -203,6 +214,7 @@
 <symbol id="i-arrow_upward" viewBox="0 -960 960 960"><path d="M440-160v-487L216-423l-56-57 320-320 320 320-56 57-224-224v487h-80Z"/></symbol>
 <symbol id="i-arrow_downward" viewBox="0 -960 960 960"><path d="M440-800v487L216-537l-56 57 320 320 320-320-56-57-224 224v-487h-80Z"/></symbol>
 <symbol id="i-refresh" viewBox="0 -960 960 960"><path d="M480-160q-134 0-227-93t-93-227q0-134 93-227t227-93q69 0 132 28.5T720-690v-110h80v280H520v-80h168q-32-56-87.5-88T480-720q-100 0-170 70t-70 170q0 100 70 170t170 70q77 0 139-44t87-116h84q-28 106-114 173t-196 67Z"/></symbol>
+<symbol id="i-lock" viewBox="0 -960 960 960"><path d="M240-80q-33 0-56.5-23.5T160-160v-400q0-33 23.5-56.5T240-640h40v-80q0-83 58.5-141.5T480-920q83 0 141.5 58.5T680-720v80h40q33 0 56.5 23.5T800-560v400q0 33-23.5 56.5T720-80H240Zm0-80h480v-400H240v400Zm240-120q33 0 56.5-23.5T560-360q0-33-23.5-56.5T480-440q-33 0-56.5 23.5T400-360q0 33 23.5 56.5T480-280ZM360-640h240v-80q0-50-35-85t-85-35q-50 0-85 35t-35 85v80ZM240-160v-400 400Z"/></symbol>
 <symbol id="i-dashboard" viewBox="0 -960 960 960"><path d="M520-600v-240h320v240H520ZM120-440v-400h320v400H120Zm400 320v-400h320v400H520Zm-400 0v-240h320v240H120Zm80-400h160v-240H200v240Zm400 320h160v-240H600v240Zm0-480h160v-80H600v80ZM200-200h160v-80H200v80Zm160-320Zm240-160Zm0 240ZM360-280Z"/></symbol>
 <symbol id="i-palette" viewBox="0 -960 960 960"><path d="M480-80q-82 0-155-31.5t-127.5-86Q143-252 111.5-325T80-480q0-83 32.5-156t88-127Q256-817 330-848.5T488-880q80 0 151 27.5t124.5 76q53.5 48.5 85 115T880-518q0 115-70 176.5T640-280h-74q-9 0-12.5 5t-3.5 11q0 12 15 34.5t15 51.5q0 50-27.5 74T480-80Zm0-400Zm-220 40q26 0 43-17t17-43q0-26-17-43t-43-17q-26 0-43 17t-17 43q0 26 17 43t43 17Zm120-160q26 0 43-17t17-43q0-26-17-43t-43-17q-26 0-43 17t-17 43q0 26 17 43t43 17Zm200 0q26 0 43-17t17-43q0-26-17-43t-43-17q-26 0-43 17t-17 43q0 26 17 43t43 17Zm120 160q26 0 43-17t17-43q0-26-17-43t-43-17q-26 0-43 17t-17 43q0 26 17 43t43 17ZM480-160q9 0 14.5-5t5.5-13q0-14-15-33t-15-57q0-42 29-67t71-25h70q66 0 113-38.5T800-518q0-121-92.5-201.5T488-800q-136 0-232 93t-96 227q0 133 93.5 226.5T480-160Z"/></symbol>
 <symbol id="i-upload" viewBox="0 -960 960 960"><path d="M440-320v-326L336-542l-56-58 200-200 200 200-56 58-104-104v326h-80ZM240-160q-33 0-56.5-23.5T160-240v-120h80v120h480v-120h80v120q0 33-23.5 56.5T720-160H240Z"/></symbol>
@@ -387,7 +399,7 @@
         <div class="row" style="margin-top:12px">
           <input type="text" id="new-room-name" placeholder="Name (e.g. Hangout)" style="flex:1;min-width:180px">
           <select id="new-room-type" style="width:120px"><option value="text">Text</option><option value="voice">Voice</option></select>
-          <label class="row" style="gap:6px;color:var(--muted)"><input type="checkbox" id="new-room-private"> Private</label>
+          <label class="row" style="gap:6px;color:var(--muted)" title="Starts hidden from everyone but you; choose which roles can see it afterwards"><input type="checkbox" id="new-room-private"> Private</label>
           <button id="room-create"><svg class="ic"><use href="#i-add"/></svg>Create</button><span class="msg" id="room-msg"></span>
         </div>
       </div>
@@ -860,8 +872,41 @@ const uploadsSaver = makeSaver({ btn: $('uploads-save'), msg: $('uploads-msg'), 
   } });
 
 // ── Channels ─────────────────────────────────────────────────────────
+// "Who can see this?" for a category or channel: Everyone, or only members
+// with one of the chosen roles (the owner and Administrators always can).
+// Changes apply straight away, with a brief ✓.
+function accessEditor(el, label, cur, path) {
+  const roles = roleData.roles.filter(r => !r.is_default);
+  const draw = () => {
+    const chosen = cur.role_ids.map(roleById).filter(Boolean);
+    el.innerHTML = `<span>${label}</span>
+      <select data-mode><option value="all">Everyone</option><option value="roles">Only certain roles</option></select>
+      ${cur.private ? chosen.map(r => `<span class="rchip"><i class="rdot" style="background:${r.color || 'var(--muted)'}"></i>${esc(r.name)}<button title="Remove" data-rm="${r.id}">${icon('close')}</button></span>`).join('') : ''}
+      ${cur.private && roles.some(r => !cur.role_ids.includes(r.id)) ? `<select data-add class="rchip-add"><option value="">+ Add role</option>${roles.filter(r => !cur.role_ids.includes(r.id)).map(r => `<option value="${r.id}">${esc(r.name)}</option>`).join('')}</select>` : ''}
+      ${cur.private && !chosen.length ? '<span style="color:var(--yellow)">Only you (and Administrators) can see it until you add a role.</span>' : ''}
+      ${cur.private && !roles.length ? '<span>Create roles on the Roles page first.</span>' : ''}
+      <span class="saved-tick">${icon('check')}Saved</span>`;
+    el.querySelector('[data-mode]').value = cur.private ? 'roles' : 'all';
+    el.querySelector('[data-mode]').onchange = e => save({ private: e.target.value === 'roles', role_ids: cur.role_ids });
+    el.querySelector('[data-add]')?.addEventListener('change', e => e.target.value && save({ private: true, role_ids: [...cur.role_ids, e.target.value] }));
+    el.querySelectorAll('[data-rm]').forEach(b => b.onclick = () => save({ private: true, role_ids: cur.role_ids.filter(id => id !== b.dataset.rm) }));
+  };
+  const save = async next => {
+    try {
+      await api(path, { method: 'PUT', json: next });
+      Object.assign(cur, next); draw();
+      const t = el.querySelector('.saved-tick'); t.classList.add('on'); setTimeout(() => t.classList.remove('on'), 1400);
+      el.dispatchEvent(new CustomEvent('access-changed', { bubbles: true }));
+    } catch (e) { toast(e.message, true); draw(); }
+  };
+  draw();
+}
+
 async function loadRooms() {
   const rooms = await api('/api/admin/rooms');
+  const access = await api('/api/admin/access');
+  await loadRoleData();
+  const acc = (kind, id) => access[kind][id] || (access[kind][id] = { private: false, role_ids: [] });
   const el = $('rooms'); el.innerHTML = '';
   let channels = 0;
   if (!rooms.length) el.innerHTML = '<div class="card empty">No categories yet — create one below.</div>';
@@ -873,9 +918,11 @@ async function loadRooms() {
     const div = document.createElement('div'); div.className = 'room card';
     div.innerHTML = `
       <div class="room-head"><div class="room-name">${voice ? icon('volume_up') : icon('tag')}${esc(room.name)}
-          <span class="tagp">${voice ? 'voice' : 'text'}</span>${room.is_private ? '<span class="tagp">private</span>' : ''}</div>
+          <span class="tagp">${voice ? 'voice' : 'text'}</span><span class="tagp" data-private-tag ${acc('rooms', room.id).private ? '' : 'hidden'}>private</span></div>
         <button class="small danger" data-del-room>${icon('delete')}Delete</button></div>
-      <div class="boards">${boards.map(b => `<span class="chip">${voice ? '' : '#'}${esc(b.name)}<button title="Delete channel" data-del-board="${b.id}" data-name="${esc(b.name)}">${icon('close')}</button></span>`).join('') || '<span class="hint" style="margin:0">No channels</span>'}</div>
+      <div class="access" data-room-access></div>
+      <div class="boards">${boards.map(b => `<span class="chip${acc('boards', b.id).private ? ' locked' : ''}" data-board="${b.id}">${voice ? '' : '#'}${esc(b.name)}<button class="lock" title="Who can see this channel" data-lock="${b.id}">${icon('lock')}</button><button title="Delete channel" data-del-board="${b.id}" data-name="${esc(b.name)}">${icon('close')}</button></span>`).join('') || '<span class="hint" style="margin:0">No channels</span>'}</div>
+      <div class="board-access hidden" data-board-access></div>
       <div class="row"><input type="text" placeholder="${voice ? 'New voice channel (e.g. General)' : 'New channel (e.g. general)'}" style="flex:1" data-new-board>
         <button class="small" data-add-board>${icon('add')}Add channel</button></div>`;
     div.querySelector('[data-del-room]').onclick = () => confirmBox(`Delete “${room.name}”?`, 'This deletes the category, every channel in it, and all of their messages. It can\u2019t be undone.', 'Delete', async () => {
@@ -884,6 +931,22 @@ async function loadRooms() {
     div.querySelectorAll('[data-del-board]').forEach(b => b.onclick = () => confirmBox(`Delete #${b.dataset.name}?`, 'All of its messages are deleted too.', 'Delete', async () => {
       await api('/api/admin/boards/' + b.dataset.delBoard, { method: 'DELETE' }); loadRooms();
     }));
+    // Who can see the category…
+    accessEditor(div.querySelector('[data-room-access]'), 'Who can see this category:', acc('rooms', room.id), `/api/admin/rooms/${room.id}/access`);
+    div.querySelector('[data-room-access]').addEventListener('access-changed', () => {
+      div.querySelector('[data-private-tag]').hidden = !acc('rooms', room.id).private;
+    });
+    // …and each channel in it (the lock opens its setting below the list).
+    const panel = div.querySelector('[data-board-access]');
+    div.querySelectorAll('[data-lock]').forEach(btn => btn.onclick = () => {
+      const id = btn.dataset.lock, b = boards.find(x => x.id === id);
+      if (panel.dataset.open === id) { panel.classList.add('hidden'); panel.dataset.open = ''; return; }
+      panel.dataset.open = id; panel.classList.remove('hidden');
+      panel.innerHTML = `<b>${voice ? '' : '#'}${esc(b.name)}</b> <span class="hint" style="margin:0">— ${acc('rooms', room.id).private ? 'also needs access to the category above' : 'inside a category everyone can see'}</span><div class="access"></div>`;
+      const ed = panel.querySelector('.access');
+      accessEditor(ed, 'Who can see this channel:', acc('boards', id), `/api/admin/boards/${id}/access`);
+      ed.addEventListener('access-changed', () => div.querySelector(`[data-board="${id}"]`).classList.toggle('locked', acc('boards', id).private));
+    });
     const input = div.querySelector('[data-new-board]');
     const add = async () => { const name = input.value.trim(); if (!name) return;
       try { await api('/api/admin/boards', { json: { room_id: room.id, name } }); loadRooms(); } catch (e) { toast(e.message, true); } };

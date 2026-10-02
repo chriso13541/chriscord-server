@@ -183,8 +183,9 @@ pub async fn get_messages(
     Query(q):       Query<MessagesQuery>,
     State(s):       State<Arc<AppState>>,
 ) -> Result<Json<Vec<ChatMessage>>, ApiErr> {
-    db::verify_token(&s.pool, token_from(&headers)).await
+    let username = db::verify_token(&s.pool, token_from(&headers)).await
         .map_err(|_| db_err())?.ok_or_else(unauth)?;
+    crate::access::require_board(&s.pool, &username, &board_id).await?;
 
     // Ordering by id (UUIDv7) rather than created_at: UUIDv7 embeds its
     // timestamp as the leading bytes specifically so lexicographic string
@@ -225,8 +226,9 @@ pub async fn get_messages_around(
     Path((board_id, message_id)): Path<(String, String)>,
     State(s): State<Arc<AppState>>,
 ) -> Result<Json<Vec<ChatMessage>>, ApiErr> {
-    db::verify_token(&s.pool, token_from(&headers)).await
+    let username = db::verify_token(&s.pool, token_from(&headers)).await
         .map_err(|_| db_err())?.ok_or_else(unauth)?;
+    crate::access::require_board(&s.pool, &username, &board_id).await?;
 
     const AROUND_HALF: i64 = HISTORY_PAGE / 2;
 
@@ -262,7 +264,7 @@ pub async fn search_messages(
     Query(q): Query<SearchQuery>,
     State(s): State<Arc<AppState>>,
 ) -> Result<Json<Vec<SearchResult>>, ApiErr> {
-    db::verify_token(&s.pool, token_from(&headers)).await
+    let username = db::verify_token(&s.pool, token_from(&headers)).await
         .map_err(|_| db_err())?.ok_or_else(unauth)?;
 
     let term = q.q.trim().to_string();
@@ -320,6 +322,12 @@ pub async fn search_messages(
     }
     if wheres.is_empty() {
         return Ok(Json(vec![]));
+    }
+    // Only channels you can see.
+    if let Some(v) = crate::access::visible_for(&s.pool, &username).await {
+        if v.boards.is_empty() { return Ok(Json(vec![])); }
+        wheres.push(format!("m.board_id IN ({})", vec!["?"; v.boards.len()].join(",")));
+        binds.extend(v.boards.into_iter());
     }
 
     // The LIKE fallback can't tell words from substrings, so it fetches
@@ -412,6 +420,7 @@ pub async fn post_message(
 
     let content     = body.content.as_deref().unwrap_or("").trim().to_string();
     let attachments = body.attachments.unwrap_or_default();
+    crate::access::require_board(&s.pool, &username, &board_id).await?;
     crate::roles::require(&s.pool, &username, crate::roles::SEND_MESSAGES, "send messages").await?;
     if !attachments.is_empty() {
         crate::roles::require(&s.pool, &username, crate::roles::ATTACH_FILES, "attach files").await?;
@@ -518,8 +527,9 @@ pub async fn get_pins(
     Path(board_id): Path<String>,
     State(s):       State<Arc<AppState>>,
 ) -> Result<Json<Vec<ChatMessage>>, ApiErr> {
-    db::verify_token(&s.pool, token_from(&headers)).await
+    let username = db::verify_token(&s.pool, token_from(&headers)).await
         .map_err(|_| db_err())?.ok_or_else(unauth)?;
+    crate::access::require_board(&s.pool, &username, &board_id).await?;
     let rows = sqlx::query(&format!(
         "{} WHERE board_id = ? AND pinned_at IS NOT NULL ORDER BY pinned_at DESC", SELECT
     )).bind(&board_id).fetch_all(&s.pool).await.map_err(|_| db_err())?;
@@ -558,6 +568,7 @@ async fn set_pinned(s: &AppState, headers: &HeaderMap, id: &str, pinned: bool) -
         .bind(id).fetch_optional(&s.pool).await.map_err(|_| db_err())?
         .ok_or_else(not_found)?;
     let board_id: String = row.get("board_id");
+    crate::access::require_board(&s.pool, &username, &board_id).await?;
 
     if pinned {
         sqlx::query("UPDATE messages SET pinned_at = ?, pinned_by = ? WHERE id = ? AND pinned_at IS NULL")
@@ -651,6 +662,7 @@ pub async fn react(
         .bind(&id).fetch_optional(&s.pool).await.map_err(|_| db_err())?
         .ok_or_else(not_found)?;
     let board_id: String = row.get("board_id");
+    crate::access::require_board(&s.pool, &username, &board_id).await?;
 
     let changed = if body.on {
         // A brand-new emoji on this message counts against the cap; adding

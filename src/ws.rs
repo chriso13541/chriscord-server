@@ -71,6 +71,11 @@ async fn handle_socket(socket: WebSocket, token: String, initial_status: Option<
     };
     // Where this account's picture/banner/bio are stored (by public key).
     let user_key = crate::pfp::storage_key_for(&state.pool, &username).await.unwrap_or_default();
+    // Which channels this member can see (None = all). Worked out again
+    // whenever channels or roles change (see the forwarding below), and used
+    // to keep private channels' messages and voice activity from them.
+    let mut visible = crate::access::visible_for(&state.pool, &username).await;
+    let sees = |vis: &Option<crate::access::Visible>, board: &str| vis.as_ref().map_or(true, |v| v.boards.contains(board));
     if let Some(st) = initial_status.filter(|s| valid_status(s)) {
         state.presence.lock().unwrap().insert(username.clone(), st);
     }
@@ -111,6 +116,7 @@ async fn handle_socket(socket: WebSocket, token: String, initial_status: Option<
                     Some(Ok(Message::Text(text))) => {
                         let Ok(cm) = serde_json::from_str::<ClientMsg>(&text) else { continue };
                         match cm.msg_type.as_str() {
+                            "subscribe" if cm.board_id.as_deref().map_or(false, |b| !sees(&visible, b)) => {}
                             "subscribe" => {
                                 if let Some(bid) = cm.board_id {
                                     let history = load_history(&state, &bid).await;
@@ -126,7 +132,8 @@ async fn handle_socket(socket: WebSocket, token: String, initial_status: Option<
                                     let content     = cm.content.as_deref().unwrap_or("").trim().to_string();
                                     let attachments = cm.attachments.unwrap_or_default();
                                     let perms = crate::roles::permissions_of(&state.pool, &username).await;
-                                    let denied = if perms & crate::roles::SEND_MESSAGES == 0 { Some("send messages") }
+                                    let denied = if !sees(&visible, &bid) { Some("post in that channel") }
+                                        else if perms & crate::roles::SEND_MESSAGES == 0 { Some("send messages") }
                                         else if !attachments.is_empty() && perms & crate::roles::ATTACH_FILES == 0 { Some("attach files") }
                                         else { None };
                                     if let Some(what) = denied {
@@ -137,6 +144,11 @@ async fn handle_socket(socket: WebSocket, token: String, initial_status: Option<
                                         save_and_broadcast(&state, &bid, &username, &content, attachments).await;
                                     }
                                 }
+                            }
+                            "join_voice" if cm.board_id.as_deref().map_or(false, |b| !sees(&visible, b)) => {
+                                send_to_user(&state, &username, serde_json::json!({
+                                    "type": "action_denied", "message": "You don't have access to that voice channel",
+                                }));
                             }
                             "join_voice" if !crate::roles::has(&state.pool, &username, crate::roles::CONNECT).await => {
                                 send_to_user(&state, &username, serde_json::json!({
@@ -386,7 +398,32 @@ async fn handle_socket(socket: WebSocket, token: String, initial_status: Option<
             result = rx.recv() => {
                 match result {
                     Ok(bcast) => {
-                        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&bcast) {
+                        if let Ok(mut v) = serde_json::from_str::<serde_json::Value>(&bcast) {
+                            // Channels or roles changed: work out again what this member can see.
+                            if matches!(v["type"].as_str(), Some("rooms_updated") | Some("roles_updated")) {
+                                visible = crate::access::visible_for(&state.pool, &username).await;
+                                // In a voice channel they can no longer see? Take them out of it.
+                                let in_board = { state.voice.lock().unwrap().get(&username).cloned() };
+                                if let Some(bid) = in_board.filter(|b| !sees(&visible, b) && voice_owner(&username) == Some(conn_id)) {
+                                    { voice_owners().lock().unwrap().remove(&username); }
+                                    { state.voice.lock().unwrap().remove(&username); }
+                                    { state.voice_status.lock().unwrap().remove(&username); }
+                                    voice::close_participant(&state, &bid, &username).await;
+                                    broadcast_voice_state(&state);
+                                    let notice = serde_json::json!({ "type": "voice_removed", "message": "You no longer have access to that voice channel" });
+                                    if sink.send(Message::Text(notice.to_string())).await.is_err() { break; }
+                                }
+                            }
+                            let mut bcast = bcast;
+                            // Who's in which call: leave out channels they can't see.
+                            if v["type"].as_str() == Some("voice_state") && visible.is_some() {
+                                for key in ["channels", "reconnecting"] {
+                                    if let Some(map) = v[key].as_object_mut() {
+                                        map.retain(|board, _| sees(&visible, board));
+                                    }
+                                }
+                                bcast = v.to_string();
+                            }
                             let fwd = match v["type"].as_str() {
                                 Some("users") | Some("server_updated") => true,
                                 Some("typing") => v["username"].as_str() != Some(username.as_str()),
@@ -405,7 +442,7 @@ async fn handle_socket(socket: WebSocket, token: String, initial_status: Option<
                                 Some("voice_moved") => v["target"].as_str() == Some(username.as_str()) && v["target_conn"].as_u64() == Some(conn_id),
                                 Some("voice_mute_state") => true,
                                 Some("pfp_updated") | Some("profile_updated") => true,
-                                Some("message") => true,
+                                Some("message") => v["data"]["board_id"].as_str().map_or(true, |b| sees(&visible, b)),
                                 Some("message_edit") | Some("message_delete") | Some("message_pin") | Some("message_reaction") => subscribed_board.as_deref()
                                     .map(|bid| v["board_id"].as_str() == Some(bid))
                                     .unwrap_or(false),
