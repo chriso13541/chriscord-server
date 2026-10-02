@@ -95,6 +95,23 @@
   .dot { display:inline-block; width:8px; height:8px; border-radius:50%; margin-right:6px; background:var(--muted); }
   .dot.online { background:var(--green); } .dot.idle { background:var(--yellow); }
   .acts { display:flex; gap:6px; justify-content:flex-end; flex-wrap:wrap; }
+  /* roles */
+  .roles-wrap { display:flex; gap:18px; align-items:flex-start; flex-wrap:wrap; }
+  .roles-list { width:260px; flex-shrink:0; padding:10px; }
+  .role-edit { flex:1; min-width:300px; }
+  .role-row { display:flex; align-items:center; gap:8px; padding:7px 8px; border-radius:6px; cursor:pointer; }
+  .role-row:hover { background:var(--surface2); } .role-row.on { background:var(--surface2); outline:1px solid var(--accent); }
+  .role-row .rname { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-weight:600; }
+  .role-row .rcount { font-size:.75rem; color:var(--muted); }
+  .role-row .rmove { padding:2px; background:none; color:var(--muted); } .role-row .rmove:hover { color:var(--text); } .role-row .rmove:disabled { opacity:.25; }
+  .rdot { width:12px; height:12px; border-radius:50%; flex-shrink:0; background:var(--muted); }
+  .perm { display:flex; gap:12px; align-items:flex-start; padding:10px 0; border-bottom:1px solid var(--border); }
+  .perm:last-child { border-bottom:none; }
+  .perm b { display:block; color:var(--strong); } .perm span { font-size:.8rem; color:var(--muted); }
+  .perm input { margin-top:3px; width:16px; height:16px; accent-color:var(--accent); flex-shrink:0; }
+  .rchip { display:inline-flex; align-items:center; gap:5px; padding:2px 4px 2px 8px; border-radius:10px; background:var(--surface2); font-size:.78rem; margin:2px 4px 2px 0; }
+  .rchip button { padding:0 2px; background:none; color:var(--muted); } .rchip button:hover { color:var(--red); }
+  .rchip-add { padding:2px 6px; font-size:.78rem; border-radius:10px; width:auto; }
   .empty { color:var(--muted); padding:18px 4px; }
 
   /* modal */
@@ -162,6 +179,9 @@
 <!-- Icons: Google Material Symbols, Apache 2.0 — see THIRD_PARTY_NOTICES.txt -->
 <svg xmlns="http://www.w3.org/2000/svg" style="display:none">
 <symbol id="i-format_paint" viewBox="0 -960 960 960"><path d="M440-80q-33 0-56.5-23.5T360-160v-160H240q-33 0-56.5-23.5T160-400v-280q0-66 47-113t113-47h480v440q0 33-23.5 56.5T720-320H600v160q0 33-23.5 56.5T520-80h-80ZM240-560h480v-200h-40v160h-80v-160h-40v80h-80v-80H320q-33 0-56.5 23.5T240-680v120Zm0 160h480v-80H240v80Zm0 0v-80 80Z"/></symbol>
+<symbol id="i-shield_person" viewBox="0 -960 960 960"><path d="M480-440q-59 0-99.5-40.5T340-580q0-59 40.5-99.5T480-720q59 0 99.5 40.5T620-580q0 59-40.5 99.5T480-440Zm0-80q26 0 43-17t17-43q0-26-17-43t-43-17q-26 0-43 17t-17 43q0 26 17 43t43 17Zm0 440q-139-35-229.5-159.5T160-516v-244l320-120 320 120v244q0 152-90.5 276.5T480-80Zm0-400Zm0-315-240 90v189q0 54 15 105t41 96q42-21 88-33t96-12q50 0 96 12t88 33q26-45 41-96t15-105v-189l-240-90Zm0 515q-36 0-70 8t-65 22q29 30 63 52t72 34q38-12 72-34t63-52q-31-14-65-22t-70-8Z"/></symbol>
+<symbol id="i-arrow_upward" viewBox="0 -960 960 960"><path d="M440-160v-487L216-423l-56-57 320-320 320 320-56 57-224-224v487h-80Z"/></symbol>
+<symbol id="i-arrow_downward" viewBox="0 -960 960 960"><path d="M440-800v487L216-537l-56 57 320 320 320-320-56-57-224 224v-487h-80Z"/></symbol>
 <symbol id="i-dashboard" viewBox="0 -960 960 960"><path d="M520-600v-240h320v240H520ZM120-440v-400h320v400H120Zm400 320v-400h320v400H520Zm-400 0v-240h320v240H120Zm80-400h160v-240H200v240Zm400 320h160v-240H600v240Zm0-480h160v-80H600v80ZM200-200h160v-80H200v80Zm160-320Zm240-160Zm0 240ZM360-280Z"/></symbol>
 <symbol id="i-palette" viewBox="0 -960 960 960"><path d="M480-80q-82 0-155-31.5t-127.5-86Q143-252 111.5-325T80-480q0-83 32.5-156t88-127Q256-817 330-848.5T488-880q80 0 151 27.5t124.5 76q53.5 48.5 85 115T880-518q0 115-70 176.5T640-280h-74q-9 0-12.5 5t-3.5 11q0 12 15 34.5t15 51.5q0 50-27.5 74T480-80Zm0-400Zm-220 40q26 0 43-17t17-43q0-26-17-43t-43-17q-26 0-43 17t-17 43q0 26 17 43t43 17Zm120-160q26 0 43-17t17-43q0-26-17-43t-43-17q-26 0-43 17t-17 43q0 26 17 43t43 17Zm200 0q26 0 43-17t17-43q0-26-17-43t-43-17q-26 0-43 17t-17 43q0 26 17 43t43 17Zm120 160q26 0 43-17t17-43q0-26-17-43t-43-17q-26 0-43 17t-17 43q0 26 17 43t43 17ZM480-160q9 0 14.5-5t5.5-13q0-14-15-33t-15-57q0-42 29-67t71-25h70q66 0 113-38.5T800-518q0-121-92.5-201.5T488-800q-136 0-232 93t-96 227q0 133 93.5 226.5T480-160Z"/></symbol>
 <symbol id="i-upload" viewBox="0 -960 960 960"><path d="M440-320v-326L336-542l-56-58 200-200 200 200-56 58-104-104v326h-80ZM240-160q-33 0-56.5-23.5T160-240v-120h80v120h480v-120h80v120q0 33-23.5 56.5T720-160H240Z"/></symbol>
@@ -207,6 +227,7 @@
     <a data-sec="uploads"><svg class="ic"><use href="#i-upload"/></svg>Uploads</a>
     <a data-sec="channels"><svg class="ic"><use href="#i-tag"/></svg>Channels</a>
     <a data-sec="members"><svg class="ic"><use href="#i-group"/></svg>Members</a>
+    <a data-sec="roles"><svg class="ic"><use href="#i-shield_person"/></svg>Roles</a>
     <a data-sec="bans"><svg class="ic"><use href="#i-block"/></svg>Bans</a>
     <div class="spacer"></div>
     <a id="signout"><svg class="ic"><use href="#i-logout"/></svg>Sign out</a>
@@ -351,11 +372,23 @@
     <section id="sec-members">
       <h2>Members</h2><p class="sub">Everyone who has joined. The crown marks the server owner in everyone's member list.</p>
       <div class="card" style="padding:8px 12px">
-        <table><thead><tr><th>Member</th><th>Status</th><th>Joined</th><th style="text-align:right">Actions</th></tr></thead>
+        <table><thead><tr><th>Member</th><th>Roles</th><th>Status</th><th>Joined</th><th style="text-align:right">Actions</th></tr></thead>
           <tbody id="members"></tbody></table>
       </div>
       <p class="hint"><b>Kick</b> signs them out and removes them from the member list — like Discord, they can come back by
         joining again (with the join key, if you've set one). <b>Ban</b> does the same and blocks their account from ever joining again.</p>
+    </section>
+
+    <!-- Roles -->
+    <section id="sec-roles">
+      <h2>Roles</h2><p class="sub">Like Discord's: what members can do, the colour of their name, and how the online list is grouped.
+        Everyone has <b>@everyone</b>; give people more roles from Members. Higher roles outrank lower ones — the order decides name colour,
+        online-list grouping, and who can kick whom. The crowned owner can always do everything.</p>
+      <div class="roles-wrap">
+        <div class="card roles-list"><div id="role-list"></div>
+          <button id="role-new" style="margin-top:10px;width:100%;justify-content:center"><svg class="ic"><use href="#i-add"/></svg>Create role</button></div>
+        <div class="card role-edit" id="role-edit"><p class="hint">Pick a role to edit it.</p></div>
+      </div>
     </section>
 
     <!-- Bans -->
@@ -425,6 +458,7 @@ document.querySelectorAll('nav a[data-sec]').forEach(a => a.onclick = () => {
   document.querySelectorAll('main section').forEach(s => s.classList.toggle('on', s.id === 'sec-' + a.dataset.sec));
   if (a.dataset.sec === 'members') loadMembers();
   if (a.dataset.sec === 'bans') loadBans();
+  if (a.dataset.sec === 'roles') loadRoles();
 });
 
 // ── Load ─────────────────────────────────────────────────────────────
@@ -762,12 +796,87 @@ $('room-create').onclick = async () => {
 };
 
 // ── Members ──────────────────────────────────────────────────────────
+// ── Roles ─────────────────────────────────────────────────────────────
+let roleData = { roles: [], members: {}, permissions: [] }, editingRole = null;
+async function loadRoleData() { roleData = await api('/api/admin/roles'); }
+const roleById = id => roleData.roles.find(r => r.id === id);
+// The member's roles as removable chips, plus a menu to add one.
+function renderMemberRoles(td, username) {
+  const mine = (roleData.members[username] || []).map(roleById).filter(Boolean).sort((a, b) => b.position - a.position);
+  td.innerHTML = mine.map(r => `<span class="rchip"><i class="rdot" style="background:${r.color || 'var(--muted)'}"></i>${esc(r.name)}<button title="Remove role" data-rm="${r.id}">${icon('close')}</button></span>`).join('');
+  const addable = roleData.roles.filter(r => !r.is_default && !mine.includes(r));
+  if (addable.length) {
+    const sel = document.createElement('select'); sel.className = 'rchip-add';
+    sel.innerHTML = '<option value="">+ Add role</option>' + addable.map(r => `<option value="${r.id}">${esc(r.name)}</option>`).join('');
+    sel.onchange = () => sel.value && setMemberRoles(username, [...mine.map(r => r.id), sel.value]);
+    td.appendChild(sel);
+  }
+  td.querySelectorAll('[data-rm]').forEach(b => b.onclick = () => setMemberRoles(username, mine.map(r => r.id).filter(id => id !== b.dataset.rm)));
+}
+async function setMemberRoles(username, ids) {
+  try { await api(`/api/admin/members/${encodeURIComponent(username)}/roles`, { method: 'PUT', json: { role_ids: ids } }); await loadMembers(); }
+  catch (e) { toast(e.message, true); }
+}
+async function loadRoles() {
+  await loadRoleData();
+  const el = $('role-list'); el.innerHTML = '';
+  const count = id => Object.values(roleData.members).filter(ids => ids.includes(id)).length;
+  const movable = roleData.roles.filter(r => !r.is_default);
+  roleData.roles.forEach(r => {
+    const row = document.createElement('div'); row.className = 'role-row' + (editingRole === r.id ? ' on' : '');
+    const i = movable.indexOf(r);
+    row.innerHTML = `<i class="rdot" style="background:${r.color || 'var(--muted)'}"></i><span class="rname">${esc(r.name)}</span>
+      <span class="rcount">${r.is_default ? 'all' : count(r.id)}</span>
+      ${r.is_default ? '' : `<button class="rmove" title="Move up" data-up ${i === 0 ? 'disabled' : ''}>${icon('arrow_upward')}</button><button class="rmove" title="Move down" data-down ${i === movable.length - 1 ? 'disabled' : ''}>${icon('arrow_downward')}</button>`}`;
+    row.onclick = e => { if (!e.target.closest('.rmove')) { editingRole = r.id; loadRoles(); } };
+    const move = d => { const ids = movable.map(x => x.id); const j = i + d; [ids[i], ids[j]] = [ids[j], ids[i]];
+      api('/api/admin/roles/order', { json: { ids } }).then(loadRoles).catch(err => toast(err.message, true)); };
+    row.querySelector('[data-up]')?.addEventListener('click', e => { e.stopPropagation(); move(-1); });
+    row.querySelector('[data-down]')?.addEventListener('click', e => { e.stopPropagation(); move(1); });
+    el.appendChild(row);
+  });
+  renderRoleEditor();
+}
+function renderRoleEditor() {
+  const box = $('role-edit'), r = roleById(editingRole);
+  if (!r) { box.innerHTML = '<p class="hint">Pick a role to edit it.</p>'; return; }
+  const def = r.is_default;
+  box.innerHTML = `<h3>${def ? '@everyone' : 'Edit role'}</h3>
+    ${def ? '<p class="hint">What every member can do. Other roles add to this.</p>' : ''}
+    <label class="f" for="re-name">Name</label><input type="text" id="re-name" maxlength="32" value="${esc(r.name)}" ${def ? 'disabled' : ''}>
+    ${def ? '' : `<label class="f">Colour</label>
+      <div class="row"><input type="color" id="re-color" value="${r.color || '#99aab5'}" style="width:48px;height:34px;padding:0">
+        <label class="row" style="gap:6px;color:var(--muted)"><input type="checkbox" id="re-nocolor" ${r.color ? '' : 'checked'}> No colour</label></div>
+      <label class="row" style="gap:8px;margin-top:14px;cursor:pointer"><input type="checkbox" id="re-hoist" ${r.hoist ? 'checked' : ''}> Show members with this role separately in the online list</label>`}
+    <label class="f">Permissions</label>
+    <div>${roleData.permissions.map(p => `<label class="perm"><input type="checkbox" data-bit="${p.bit}" ${(r.permissions & p.bit) ? 'checked' : ''}><div><b>${esc(p.name)}</b><span>${esc(p.about)}</span></div></label>`).join('')}</div>
+    <div class="row" style="margin-top:16px"><button id="re-save">Save</button>${def ? '' : '<button class="danger" id="re-del">Delete role</button>'}<span class="msg" id="re-msg"></span></div>`;
+  $('re-save').onclick = async () => {
+    const perms = [...box.querySelectorAll('[data-bit]')].reduce((a, c) => c.checked ? a | +c.dataset.bit : a, 0);
+    const body = { permissions: perms };
+    if (!def) { body.name = $('re-name').value; body.color = $('re-nocolor').checked ? '' : $('re-color').value; body.hoist = $('re-hoist').checked; }
+    try { await api('/api/admin/roles/' + r.id, { method: 'PUT', json: body }); flash('re-msg', 'Saved'); await loadRoles(); }
+    catch (e) { flash('re-msg', e.message, false); }
+  };
+  if (!def) {
+    $('re-color').oninput = () => $('re-nocolor').checked = false;
+    $('re-del').onclick = () => confirmBox(`Delete ${r.name}?`, 'Everyone who has it loses it. This can\u2019t be undone.', 'Delete', async () => {
+      await api('/api/admin/roles/' + r.id, { method: 'DELETE' }); editingRole = null; loadRoles();
+    });
+  }
+}
+$('role-new').onclick = async () => {
+  try { const r = await api('/api/admin/roles', { json: { name: 'new role', permissions: 0 } }); editingRole = r.id; await loadRoles(); $('re-name')?.select(); }
+  catch (e) { toast(e.message, true); }
+};
+
 async function loadMembers() {
   const list = await api('/api/admin/members');
   $('st-members').textContent = list.length;
   $('st-online').textContent = list.filter(m => m.status !== 'offline').length;
   const tb = $('members'); tb.innerHTML = '';
-  if (!list.length) { tb.innerHTML = '<tr><td colspan="4" class="empty">Nobody has joined yet.</td></tr>'; return; }
+  if (!list.length) { tb.innerHTML = '<tr><td colspan="5" class="empty">Nobody has joined yet.</td></tr>'; return; }
+  await loadRoleData();
   for (const m of list) {
     const tr = document.createElement('tr');
     const st = m.status === 'idle' ? 'Away' : m.status === 'invisible' ? 'Invisible' : m.status === 'online' ? 'Online' : 'Offline';
@@ -775,6 +884,7 @@ async function loadMembers() {
       <td><div class="who"><div class="av" style="background:${colour(m.username)}">${esc(m.username[0].toUpperCase())}</div>
         <div><div class="name">${esc(m.username)}${m.is_owner ? `<span class="crown" title="Server owner">${icon('crown')}</span>` : ''}</div>
         <div class="fp" title="Account key fingerprint">${esc(m.fingerprint)}</div></div></div></td>
+      <td class="mroles"></td>
       <td><span class="dot ${m.status === 'invisible' ? '' : m.status}"></span>${st}</td>
       <td>${fmtDate(m.joined_at)}</td>
       <td><div class="acts">
@@ -787,6 +897,7 @@ async function loadMembers() {
     };
     tr.querySelector('[data-kick]').onclick = () => kickBox(m.username, false);
     tr.querySelector('[data-ban]').onclick = () => kickBox(m.username, true);
+    renderMemberRoles(tr.querySelector('.mroles'), m.username);
     tb.appendChild(tr);
   }
 }
