@@ -24,6 +24,8 @@ pub struct Board {
     pub id:      String,
     pub room_id: String,
     pub name:    String,
+    /// Limited to certain roles (see access.rs) — the app shows a lock.
+    pub is_private: bool,
 }
 
 type ApiErr = (StatusCode, Json<serde_json::Value>);
@@ -104,7 +106,7 @@ pub async fn list_boards(
     }
 
     let rows = sqlx::query(
-        "SELECT id, room_id, name FROM boards WHERE room_id = ? ORDER BY created_at ASC",
+        "SELECT id, room_id, name, is_private FROM boards WHERE room_id = ? ORDER BY created_at ASC",
     )
     .bind(&room_id)
     .fetch_all(&s.pool)
@@ -118,6 +120,7 @@ pub async fn list_boards(
                 id:      r.get("id"),
                 room_id: r.get("room_id"),
                 name:    r.get("name"),
+                is_private: r.get::<i64, _>("is_private") != 0,
             })
             .collect(),
     ))
