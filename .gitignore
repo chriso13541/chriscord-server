@@ -1,7 +1,13 @@
 /target
-/uploads/*
-/pfps
+
+# Server data (when it's run from the repo folder rather than as the
+# service, which keeps it in /var/lib/chriscord). Never commit these.
+/uploads/
+/pfps/
+/server_assets/
 chriscord.db
 chriscord.db-shm
 chriscord.db-wal
+*.db.bak
+
 *.md
