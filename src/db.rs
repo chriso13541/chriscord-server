@@ -178,6 +178,8 @@ pub async fn init() -> Result<SqlitePool, sqlx::Error> {
         "ALTER TABLE messages ADD COLUMN pinned_by   TEXT",
         // Replies: the id of the message this one answers, if any.
         "ALTER TABLE messages ADD COLUMN reply_to    TEXT",
+        // System messages: "join" = "<name> joined the server." ('' = a normal message)
+        "ALTER TABLE messages ADD COLUMN kind        TEXT",
     ];
     for sql in migrations {
         let _ = sqlx::query(sql).execute(&pool).await;

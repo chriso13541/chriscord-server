@@ -77,6 +77,10 @@ pub struct ChatMessage {
     /// …and a short preview of it, for the line shown above the reply.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reply:       Option<ReplyPreview>,
+    /// A system message rather than something someone wrote: "join" for
+    /// "<username> joined the server."
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind:        Option<String>,
 }
 
 /// What a reply shows of the message it answers.
@@ -174,13 +178,42 @@ pub fn row_to_msg(r: &sqlx::sqlite::SqliteRow) -> ChatMessage {
         reactions:   Vec::new(), // filled in by attach_reactions
         reply_to:    r.try_get::<Option<String>, _>("reply_to").ok().flatten(),
         reply:       None,       // filled in by attach_replies
+        kind:        r.try_get::<Option<String>, _>("kind").ok().flatten().filter(|k| !k.is_empty()),
     }
+}
+
+/// Where "<name> joined the server." goes: the channel picked in the admin
+/// panel ("join_channel"; "off" turns them off), or by default the first
+/// text channel. None if there's nowhere to put it.
+pub async fn join_channel(pool: &sqlx::SqlitePool) -> Option<String> {
+    let chosen = db::get_config(pool, "join_channel").await.ok().flatten().unwrap_or_default();
+    if chosen == "off" { return None; }
+    if !chosen.is_empty() {
+        let exists = sqlx::query("SELECT 1 FROM boards WHERE id = ?").bind(&chosen).fetch_optional(pool).await.ok().flatten().is_some();
+        if exists { return Some(chosen); }
+    }
+    sqlx::query("SELECT b.id FROM boards b JOIN rooms r ON r.id = b.room_id
+                 WHERE r.room_type = 'text' ORDER BY r.created_at, b.created_at LIMIT 1")
+        .fetch_optional(pool).await.ok().flatten().map(|r| r.get("id"))
+}
+
+/// Posts "<username> joined the server." when someone joins for the first time.
+pub async fn post_join_message(s: &AppState, username: &str) {
+    let Some(board_id) = join_channel(&s.pool).await else { return };
+    let id = uuid::Uuid::now_v7().to_string();
+    let now = chrono::Utc::now().to_rfc3339();
+    let ok = sqlx::query("INSERT INTO messages (id, board_id, username, content, attachments, edited, created_at, kind) VALUES (?, ?, ?, '', '[]', 0, ?, 'join')")
+        .bind(&id).bind(&board_id).bind(username).bind(&now).execute(&s.pool).await.is_ok();
+    if !ok { return; }
+    let msg = ChatMessage { id, board_id, username: username.to_string(), content: String::new(), attachments: vec![], edited: false,
+        created_at: now, pinned: false, reactions: vec![], reply_to: None, reply: None, kind: Some("join".into()) };
+    let _ = s.tx.send(serde_json::json!({ "type": "message", "data": msg }).to_string());
 }
 
 const SELECT: &str =
     "SELECT id, board_id, username, content,
             attachment_url, attachment_name, attachment_mime,
-            attachments, edited, created_at, pinned_at, reply_to
+            attachments, edited, created_at, pinned_at, reply_to, kind
      FROM messages";
 
 // Same columns as SELECT above, plus the joined board's name and room —
@@ -188,7 +221,7 @@ const SELECT: &str =
 const SEARCH_SELECT: &str =
     "SELECT m.id, m.board_id, m.username, m.content,
             m.attachment_url, m.attachment_name, m.attachment_mime,
-            m.attachments, m.edited, m.created_at, m.pinned_at, m.reply_to,
+            m.attachments, m.edited, m.created_at, m.pinned_at, m.reply_to, m.kind,
             b.name AS board_name, b.room_id AS room_id
      FROM messages m JOIN boards b ON m.board_id = b.id";
 
@@ -471,7 +504,7 @@ pub async fn post_message(
     if reply_to.is_some() {
         let _ = sqlx::query("UPDATE messages SET reply_to = ? WHERE id = ?").bind(&reply_to).bind(&id).execute(&s.pool).await;
     }
-    let mut msg = ChatMessage { id, board_id, username, content, attachments, edited: false, created_at: now, pinned: false, reactions: Vec::new(), reply_to, reply: None };
+    let mut msg = ChatMessage { id, board_id, username, content, attachments, edited: false, created_at: now, pinned: false, reactions: Vec::new(), reply_to, reply: None, kind: None };
     attach_replies(&s.pool, std::slice::from_mut(&mut msg)).await;
     let _ = s.tx.send(serde_json::json!({ "type": "message", "data": msg }).to_string());
     Ok(Json(msg))

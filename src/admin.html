@@ -295,6 +295,9 @@
         <label class="f" for="cfg-desc">Description</label>
         <textarea id="cfg-desc" maxlength="300" placeholder="What's this server about?"></textarea>
         <div class="hint" id="desc-count" style="text-align:right">0 / 300</div>
+        <label class="f" for="cfg-joinch">"Joined the server" messages</label>
+        <select id="cfg-joinch"><option value="">First text channel (default)</option><option value="off">Off</option></select>
+        <div class="hint">Where "<i>name</i> joined the server." appears when someone joins for the first time.</div>
         <div class="row" style="margin-top:12px"><button id="custom-save">Save</button><span class="msg" id="custom-msg"></span></div>
       </div>
       <div class="card">
@@ -586,6 +589,7 @@ async function loadInfo() {
   $('cfg-name').value = info.server_name;
   $('cfg-desc').value = info.description || ''; updateDescCount();
   $('cfg-maxup').value = info.max_upload_mb;
+  fillJoinChannels(info.join_channel);
   // (These exist once the page has finished setting up; on the first load
   // they take their starting point from the values filled in here.)
   try { joinKeySaver.reset(); customSaver.reset(); uploadsSaver.reset(); } catch {}
@@ -614,12 +618,28 @@ $('joinkey-copy').onclick = () => navigator.clipboard.writeText($('cfg-joinkey')
 function updateDescCount() { $('desc-count').textContent = `${[...$('cfg-desc').value].length} / 300`; }
 $('cfg-desc').oninput = updateDescCount;
 $('cfg-name').oninput = () => { $('bp-name').textContent = $('cfg-name').value; $('icon-demo-name').textContent = $('cfg-name').value; showIcon(false); };
+// The channel list for the "joined the server" picker.
+async function fillJoinChannels(current) {
+  const sel = $('cfg-joinch');
+  try {
+    const rooms = (await api('/api/admin/rooms')).filter(r => r.room_type !== 'voice');
+    let opts = '<option value="">First text channel (default)</option><option value="off">Off</option>';
+    for (const r of rooms) {
+      const boards = await fetch('/api/rooms/' + r.id + '/boards', { headers: { 'X-Owner-Key': KEY } }).then(x => x.json()).catch(() => []);
+      for (const b of boards) opts += `<option value="${b.id}">${esc(r.name)} › #${esc(b.name)}</option>`;
+    }
+    sel.innerHTML = opts;
+  } catch {}
+  sel.value = current || '';
+  if (sel.value !== (current || '')) sel.value = '';
+  customSaver?.reset();
+}
 const customSaver = makeSaver({ btn: $('custom-save'), msg: $('custom-msg'), area: $('cfg-name').closest('.card'),
-  read: () => JSON.stringify([$('cfg-name').value, $('cfg-desc').value]),
+  read: () => JSON.stringify([$('cfg-name').value, $('cfg-desc').value, $('cfg-joinch').value]),
   save: async () => {
     const name = $('cfg-name').value.trim();
     if (!name) throw new Error('The server needs a name');
-    await api('/api/admin/settings', { json: { server_name: name, description: $('cfg-desc').value } });
+    await api('/api/admin/settings', { json: { server_name: name, description: $('cfg-desc').value, join_channel: $('cfg-joinch').value } });
     $('nav-server-name').textContent = name;
   } });
 $('banner-choose').onclick = () => $('banner-file').click();

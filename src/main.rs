@@ -1,5 +1,6 @@
 mod access;
 mod admin;
+mod invites;
 mod auth;
 mod db;
 mod files;
@@ -106,6 +107,7 @@ async fn main() {
     pfp::migrate_to_key_names(&pool).await; // pfps/<username>.* → pfps/<public key>.*
     roles::init(&pool).await.expect("Failed to set up roles");
     access::init(&pool).await.expect("Failed to set up channel access");
+    invites::init(&pool).await.expect("Failed to set up invites");
 
     let owner_key =
         db::get_or_create_config(&pool, "owner_key", || utils::generate_hex(32))
@@ -171,6 +173,8 @@ async fn main() {
         .route("/api/admin/roles/:id",  put(roles::admin_update).delete(roles::admin_delete))
         .route("/api/admin/members/:username/roles", put(roles::admin_set_member_roles))
         .route("/api/roles",            get(roles::get_roles))
+        .route("/api/invites",          post(invites::create))
+        .route("/invite/:code",         get(invites::landing))
         .route("/api/members/:username/kick", post(roles::kick_member))
         .route("/api/admin/bans",       get(admin::list_bans))
         .route("/api/admin/bans/:public_key", delete(admin::unban))

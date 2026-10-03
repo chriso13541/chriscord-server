@@ -614,7 +614,7 @@ async fn load_history(state: &Arc<AppState>, board_id: &str) -> Vec<serde_json::
     let mut rows = match sqlx::query(
         "SELECT id, board_id, username, content,
                 attachment_url, attachment_name, attachment_mime,
-                attachments, edited, created_at, pinned_at, reply_to
+                attachments, edited, created_at, pinned_at, reply_to, kind
          FROM messages WHERE board_id = ? ORDER BY id DESC LIMIT ?",
     ).bind(board_id).bind(HISTORY_PAGE).fetch_all(&state.pool).await {
         Ok(r) => r,
@@ -653,7 +653,7 @@ async fn save_and_broadcast(
     let mut msg = crate::messages::ChatMessage {
         id, board_id: board_id.to_string(), username: username.to_string(),
         content: content.to_string(), attachments, edited: false, created_at: now, pinned: false, reactions: Vec::new(),
-        reply_to, reply: None,
+        reply_to, reply: None, kind: None,
     };
     crate::messages::attach_replies(&state.pool, std::slice::from_mut(&mut msg)).await;
     let _ = state.tx.send(serde_json::json!({ "type": "message", "data": msg }).to_string());

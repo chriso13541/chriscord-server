@@ -24,6 +24,9 @@ pub struct AdminInfo {
     pub owner_username:    Option<String>,
     pub banner_updated_at: i64,
     pub icon_updated_at:   i64,
+    /// Where "… joined the server." messages go: a board id, "" = the first
+    /// text channel (default), or "off".
+    pub join_channel:      String,
 }
 
 #[derive(Deserialize)]
@@ -32,6 +35,7 @@ pub struct UpdateSettingsReq {
     pub server_key:    Option<String>,
     pub description:   Option<String>,
     pub max_upload_mb: Option<u64>,
+    pub join_channel:  Option<String>,
 }
 
 /// Upload size limit bounds for the setting (MB). 0 means unlimited.
@@ -152,6 +156,7 @@ pub async fn get_admin_info(
         owner_username: owner_username(&s.pool).await,
         banner_updated_at: banner_updated_at(&s.pool).await,
         icon_updated_at: icon_updated_at(&s.pool).await,
+        join_channel: db::get_config(&s.pool, "join_channel").await.unwrap_or(None).unwrap_or_default(),
     }))
 }
 
@@ -186,6 +191,9 @@ pub async fn update_settings(
             return Err(bad(&format!("Upload limit must be between 1 and {MAX_UPLOAD_MB} MB, or 0 for unlimited")));
         }
         db::set_config(&s.pool, "max_upload_mb", &mb.to_string()).await.map_err(|_| dberr())?;
+    }
+    if let Some(ch) = body.join_channel.as_deref().map(str::trim) {
+        db::set_config(&s.pool, "join_channel", ch).await.map_err(|_| dberr())?;
     }
     broadcast_server_updated(&s);
 

@@ -39,6 +39,9 @@ pub struct ChallengeResp {
 pub struct JoinReq {
     pub username:   String,
     pub server_key: Option<String>,
+    /// An invite code (from an invite link) — lets someone join without the key.
+    #[serde(default)]
+    pub invite:     Option<String>,
     pub public_key: String,  // hex-encoded Ed25519 public key
     pub nonce:      String,  // the nonce we issued
     pub signature:  String,  // hex-encoded Ed25519 signature of nonce bytes
@@ -111,18 +114,6 @@ pub async fn join(
     let username = body.username.trim().to_string();
     if username.is_empty() || username.len() > 32 {
         return Err(err(StatusCode::BAD_REQUEST, "Username must be 1–32 characters"));
-    }
-
-    // ── 2. Enforce server join key if configured ──────────────────────────────
-    let sk = db::get_config(&s.pool, "server_key").await
-        .map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "DB error"))?;
-    if let Some(key) = sk {
-        if !key.is_empty() {
-            let provided = body.server_key.as_deref().unwrap_or("");
-            if provided != key {
-                return Err(err(StatusCode::UNAUTHORIZED, "Invalid server key"));
-            }
-        }
     }
 
     // ── 3. Retrieve and consume the challenge nonce ───────────────────────────
@@ -203,6 +194,31 @@ pub async fn join(
         }
     }
 
+    // ── 5b. Who may join ──────────────────────────────────────────────────────
+    // Someone who's already a member (this key is registered here) just
+    // signs in. A newcomer needs the join key, if one is set — or a valid
+    // invite code, which is the point of invite links: they never contain
+    // the key. (This runs after the signature check, so "already a member"
+    // is proven, not claimed.)
+    let is_member = existing_user.iter().any(|r| sqlx::Row::get::<String, _>(r, "public_key") == body.public_key);
+    let invite = body.invite.as_deref().map(str::trim).filter(|c| !c.is_empty());
+    let mut used_invite = None;
+    if !is_member {
+        let key = db::get_config(&s.pool, "server_key").await
+            .map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "DB error"))?
+            .filter(|k| !k.is_empty());
+        let key_ok = key.as_deref().map_or(true, |k| body.server_key.as_deref() == Some(k));
+        if let Some(code) = invite {
+            if crate::invites::is_valid(&s.pool, code).await {
+                used_invite = Some(code.to_string());
+            } else if !key_ok {
+                return Err(err(StatusCode::UNAUTHORIZED, "This invite link has expired — ask for a new one"));
+            }
+        } else if !key_ok {
+            return Err(err(StatusCode::UNAUTHORIZED, "Invalid server key"));
+        }
+    }
+
     // Register on first use
     if existing_user.is_empty() {
         let now = chrono::Utc::now().to_rfc3339();
@@ -215,6 +231,9 @@ pub async fn join(
         .execute(&s.pool)
         .await
         .map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "DB error"))?;
+        if let Some(code) = &used_invite { crate::invites::record_use(&s.pool, code).await; }
+        // "<name> joined the server." in the welcome channel.
+        crate::messages::post_join_message(&s, &username).await;
     }
 
     // ── 6. Issue session token ────────────────────────────────────────────────
