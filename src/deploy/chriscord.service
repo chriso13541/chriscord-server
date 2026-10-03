@@ -1,0 +1,45 @@
+# systemd unit for chriscord-server.
+# Installed by deploy/install.sh to /etc/systemd/system/chriscord.service.
+#
+#   sudo systemctl status chriscord      # is it running?
+#   sudo systemctl restart chriscord     # restart (apps reconnect by themselves)
+#   sudo journalctl -u chriscord -f      # follow the log
+#   sudo -u chriscord chriscord-server --data-dir /var/lib/chriscord owner-key
+
+[Unit]
+Description=chriscord chat server
+Documentation=file:///usr/local/share/doc/chriscord/README.txt
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=chriscord
+Group=chriscord
+# Database, uploads, profile pictures and server images all live here.
+Environment=CHRISCORD_DATA_DIR=/var/lib/chriscord
+WorkingDirectory=/var/lib/chriscord
+# Optional settings (CHRISCORD_PUBLIC_IP etc.) — see chriscord.env.example.
+EnvironmentFile=-/etc/chriscord/chriscord.env
+ExecStart=/usr/local/bin/chriscord-server
+Restart=on-failure
+RestartSec=3
+# The server stops cleanly on SIGTERM within a second; don't wait 90 s if not.
+TimeoutStopSec=15
+
+# Hardening: it only needs its data directory and the network.
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/lib/chriscord
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target

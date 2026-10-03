@@ -425,7 +425,7 @@ async fn handle_socket(socket: WebSocket, token: String, initial_status: Option<
                                 bcast = v.to_string();
                             }
                             let fwd = match v["type"].as_str() {
-                                Some("users") | Some("server_updated") => true,
+                                Some("users") | Some("server_updated") | Some("server_restarting") => true,
                                 Some("typing") => v["username"].as_str() != Some(username.as_str()),
                                 Some("rooms_updated") => true,
                                 Some("voice_state") => true,
