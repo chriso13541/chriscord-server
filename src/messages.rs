@@ -71,6 +71,26 @@ pub struct ChatMessage {
     /// Emoji reactions, in the order each emoji was first added.
     #[serde(default)]
     pub reactions:   Vec<Reaction>,
+    /// The message this one replies to (its id), if it's a reply…
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reply_to:    Option<String>,
+    /// …and a short preview of it, for the line shown above the reply.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reply:       Option<ReplyPreview>,
+}
+
+/// What a reply shows of the message it answers.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReplyPreview {
+    pub id:          String,
+    pub username:    String,
+    /// The start of its text (up to 200 characters).
+    pub content:     String,
+    /// How many files it had — for "Click to see attachment" when there's no text.
+    pub attachments: usize,
+    /// It has since been deleted.
+    #[serde(default)]
+    pub deleted:     bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -98,6 +118,9 @@ pub struct SearchResult {
 pub struct SendMsgReq {
     pub content:     Option<String>,
     pub attachments: Option<Vec<Attachment>>,
+    /// Replying to this message (in the same channel).
+    #[serde(default)]
+    pub reply_to:    Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -149,13 +172,15 @@ pub fn row_to_msg(r: &sqlx::sqlite::SqliteRow) -> ChatMessage {
         created_at:  r.get("created_at"),
         pinned:      r.try_get::<Option<String>, _>("pinned_at").ok().flatten().is_some(),
         reactions:   Vec::new(), // filled in by attach_reactions
+        reply_to:    r.try_get::<Option<String>, _>("reply_to").ok().flatten(),
+        reply:       None,       // filled in by attach_replies
     }
 }
 
 const SELECT: &str =
     "SELECT id, board_id, username, content,
             attachment_url, attachment_name, attachment_mime,
-            attachments, edited, created_at, pinned_at
+            attachments, edited, created_at, pinned_at, reply_to
      FROM messages";
 
 // Same columns as SELECT above, plus the joined board's name and room —
@@ -163,7 +188,7 @@ const SELECT: &str =
 const SEARCH_SELECT: &str =
     "SELECT m.id, m.board_id, m.username, m.content,
             m.attachment_url, m.attachment_name, m.attachment_mime,
-            m.attachments, m.edited, m.created_at, m.pinned_at,
+            m.attachments, m.edited, m.created_at, m.pinned_at, m.reply_to,
             b.name AS board_name, b.room_id AS room_id
      FROM messages m JOIN boards b ON m.board_id = b.id";
 
@@ -442,7 +467,12 @@ pub async fn post_message(
     .bind(&attachments_json).bind(&now)
     .execute(&s.pool).await.map_err(|_| db_err())?;
 
-    let msg = ChatMessage { id, board_id, username, content, attachments, edited: false, created_at: now, pinned: false, reactions: Vec::new() };
+    let reply_to = valid_reply_target(&s.pool, &board_id, body.reply_to.as_deref()).await;
+    if reply_to.is_some() {
+        let _ = sqlx::query("UPDATE messages SET reply_to = ? WHERE id = ?").bind(&reply_to).bind(&id).execute(&s.pool).await;
+    }
+    let mut msg = ChatMessage { id, board_id, username, content, attachments, edited: false, created_at: now, pinned: false, reactions: Vec::new(), reply_to, reply: None };
+    attach_replies(&s.pool, std::slice::from_mut(&mut msg)).await;
     let _ = s.tx.send(serde_json::json!({ "type": "message", "data": msg }).to_string());
     Ok(Json(msg))
 }
@@ -592,7 +622,54 @@ async fn set_pinned(s: &AppState, headers: &HeaderMap, id: &str, pinned: bool) -
 pub const MAX_REACTION_EMOJI: usize = 50;
 
 /// Fills in `reactions` for a batch of messages with one query.
+/// A reply may only point at a message in the same channel; anything else
+/// is quietly dropped (the message is sent as a normal one).
+pub async fn valid_reply_target(pool: &sqlx::SqlitePool, board_id: &str, reply_to: Option<&str>) -> Option<String> {
+    let id = reply_to?.trim();
+    if id.is_empty() { return None; }
+    let same_board = sqlx::query("SELECT 1 FROM messages WHERE id = ? AND board_id = ?")
+        .bind(id).bind(board_id).fetch_optional(pool).await.ok().flatten().is_some();
+    same_board.then(|| id.to_string())
+}
+
+/// Fills in `reply` — the preview of the message each reply answers — in
+/// one query for the whole batch. If that message was deleted the preview
+/// says so.
+pub async fn attach_replies(pool: &sqlx::SqlitePool, msgs: &mut [ChatMessage]) {
+    let ids: Vec<String> = msgs.iter().filter_map(|m| m.reply_to.clone()).collect();
+    if ids.is_empty() {
+        return;
+    }
+    let sql = format!(
+        "SELECT id, username, content, attachments, attachment_url FROM messages WHERE id IN ({})",
+        vec!["?"; ids.len()].join(","),
+    );
+    let mut q = sqlx::query(&sql);
+    for id in &ids { q = q.bind(id); }
+    let rows = q.fetch_all(pool).await.unwrap_or_default();
+    let found: std::collections::HashMap<String, ReplyPreview> = rows.iter().map(|r| {
+        let id: String = r.get("id");
+        let content: String = r.get("content");
+        let files = r.try_get::<Option<String>, _>("attachments").ok().flatten()
+            .and_then(|j| serde_json::from_str::<Vec<Attachment>>(&j).ok()).map(|v| v.len())
+            .unwrap_or_else(|| r.try_get::<Option<String>, _>("attachment_url").ok().flatten().map_or(0, |_| 1));
+        (id.clone(), ReplyPreview {
+            id, username: r.get("username"),
+            content: content.chars().take(200).collect(),
+            attachments: files, deleted: false,
+        })
+    }).collect();
+    for m in msgs.iter_mut() {
+        if let Some(target) = &m.reply_to {
+            m.reply = Some(found.get(target).cloned().unwrap_or(ReplyPreview {
+                id: target.clone(), username: String::new(), content: String::new(), attachments: 0, deleted: true,
+            }));
+        }
+    }
+}
+
 pub async fn attach_reactions(pool: &sqlx::SqlitePool, msgs: &mut [ChatMessage]) {
+    attach_replies(pool, msgs).await;
     if msgs.is_empty() {
         return;
     }

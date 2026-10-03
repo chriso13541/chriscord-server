@@ -36,6 +36,7 @@ struct ClientMsg {
     board_id:        Option<String>,
     content:         Option<String>,
     attachments:     Option<Vec<Attachment>>,
+    reply_to:        Option<String>,
     sdp:             Option<String>,
     candidate:       Option<String>,
     sdp_mid:         Option<String>,
@@ -141,7 +142,7 @@ async fn handle_socket(socket: WebSocket, token: String, initial_status: Option<
                                             "type": "action_denied", "message": format!("You don't have permission to {what} on this server"),
                                         }));
                                     } else if !content.is_empty() || !attachments.is_empty() {
-                                        save_and_broadcast(&state, &bid, &username, &content, attachments).await;
+                                        save_and_broadcast(&state, &bid, &username, &content, attachments, cm.reply_to.clone()).await;
                                     }
                                 }
                             }
@@ -613,7 +614,7 @@ async fn load_history(state: &Arc<AppState>, board_id: &str) -> Vec<serde_json::
     let mut rows = match sqlx::query(
         "SELECT id, board_id, username, content,
                 attachment_url, attachment_name, attachment_mime,
-                attachments, edited, created_at, pinned_at
+                attachments, edited, created_at, pinned_at, reply_to
          FROM messages WHERE board_id = ? ORDER BY id DESC LIMIT ?",
     ).bind(board_id).bind(HISTORY_PAGE).fetch_all(&state.pool).await {
         Ok(r) => r,
@@ -631,6 +632,7 @@ async fn save_and_broadcast(
     username:    &str,
     content:     &str,
     attachments: Vec<Attachment>,
+    reply_to:    Option<String>,
 ) {
     let id              = uuid::Uuid::now_v7().to_string();
     let now             = chrono::Utc::now().to_rfc3339();
@@ -644,9 +646,15 @@ async fn save_and_broadcast(
     .bind(&attach_json).bind(&now)
     .execute(&state.pool).await;
 
-    let msg = crate::messages::ChatMessage {
+    let reply_to = crate::messages::valid_reply_target(&state.pool, board_id, reply_to.as_deref()).await;
+    if reply_to.is_some() {
+        let _ = sqlx::query("UPDATE messages SET reply_to = ? WHERE id = ?").bind(&reply_to).bind(&id).execute(&state.pool).await;
+    }
+    let mut msg = crate::messages::ChatMessage {
         id, board_id: board_id.to_string(), username: username.to_string(),
         content: content.to_string(), attachments, edited: false, created_at: now, pinned: false, reactions: Vec::new(),
+        reply_to, reply: None,
     };
+    crate::messages::attach_replies(&state.pool, std::slice::from_mut(&mut msg)).await;
     let _ = state.tx.send(serde_json::json!({ "type": "message", "data": msg }).to_string());
 }

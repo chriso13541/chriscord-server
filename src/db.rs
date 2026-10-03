@@ -176,6 +176,8 @@ pub async fn init() -> Result<SqlitePool, sqlx::Error> {
         // (most recently pinned first); pinned_by is who pinned it.
         "ALTER TABLE messages ADD COLUMN pinned_at   TEXT",
         "ALTER TABLE messages ADD COLUMN pinned_by   TEXT",
+        // Replies: the id of the message this one answers, if any.
+        "ALTER TABLE messages ADD COLUMN reply_to    TEXT",
     ];
     for sql in migrations {
         let _ = sqlx::query(sql).execute(&pool).await;
