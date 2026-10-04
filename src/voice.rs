@@ -460,7 +460,7 @@ pub async fn handle_offer(
                 // Their camera (it only arrives once it's turned on), or their mic.
                 let forward_target = if remote.kind() == RTPCodecType::Video {
                     tracing::info!("voice: {username_for_track}'s camera stream arrived");
-                    video_source_for(&state, &key, remote.ssrc()).await
+                    video_source_for(&state, &key, remote.ssrc(), remote.codec().capability).await
                 } else {
                     audio_target
                 };
@@ -814,21 +814,35 @@ async fn renegotiate_one(
 
 /// The shared outgoing video source for one participant's camera — made
 /// the first time it's needed, after which everyone else on the board is
-/// renegotiated to receive it. Also records the camera stream's SSRC on
-/// their current connection, for keyframe requests.
-async fn video_source_for(state: &Arc<AppState>, key: &ParticipantKey, ssrc: u32) -> Arc<TrackLocalStaticRTP> {
+/// renegotiated to receive it. It's in whatever codec their camera arrives
+/// in (H.264 normally, VP8 from apps that can't do H.264), so each viewer
+/// negotiates exactly that. If someone's codec changes (a different app
+/// version rejoined), they get a fresh source and everyone is
+/// renegotiated onto it. Also records the camera stream's SSRC on their
+/// current connection, for keyframe requests.
+async fn video_source_for(
+    state: &Arc<AppState>,
+    key: &ParticipantKey,
+    ssrc: u32,
+    codec: RTCRtpCodecCapability,
+) -> Arc<TrackLocalStaticRTP> {
     state.voice_runtime.video_ssrc.lock().await.insert(key.clone(), ssrc);
     let (source, fresh) = {
         let mut videos = state.voice_runtime.video_sources.lock().await;
         match videos.get(key) {
-            Some(existing) => (Arc::clone(existing), false),
-            None => {
+            Some(existing) if existing.codec().mime_type.eq_ignore_ascii_case(&codec.mime_type) => {
+                (Arc::clone(existing), false)
+            }
+            _ => {
                 let username = &key.1;
+                tracing::info!("voice: {username}'s camera is {} ({})", codec.mime_type, codec.sdp_fmtp_line);
                 let fresh = Arc::new(TrackLocalStaticRTP::new(
                     RTCRtpCodecCapability {
-                        mime_type: "video/VP8".to_owned(),
-                        clock_rate: 90000,
-                        ..Default::default()
+                        mime_type: codec.mime_type.clone(),
+                        clock_rate: codec.clock_rate,
+                        channels: codec.channels,
+                        sdp_fmtp_line: codec.sdp_fmtp_line.clone(),
+                        rtcp_feedback: vec![],
                     },
                     format!("video-{username}"),
                     format!("chriscord-{username}"),
@@ -838,6 +852,13 @@ async fn video_source_for(state: &Arc<AppState>, key: &ParticipantKey, ssrc: u32
             }
         }
     };
+    if fresh {
+        // Nobody has THIS source yet (a codec change replaces an old one).
+        let mut attached = state.voice_runtime.video_attached.lock().await;
+        for set in attached.values_mut() {
+            set.remove(&key.1);
+        }
+    }
     if fresh {
         let state = Arc::clone(state);
         let (board_id, username) = key.clone();
