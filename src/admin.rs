@@ -223,13 +223,14 @@ pub async fn create_room(
     let now        = chrono::Utc::now().to_rfc3339();
 
     sqlx::query(
-        "INSERT INTO rooms (id, name, is_private, room_type, created_at) VALUES (?, ?, ?, ?, ?)",
+        "INSERT INTO rooms (id, name, is_private, room_type, created_at, position) VALUES (?, ?, ?, ?, ?, ?)",
     )
     .bind(&id)
     .bind(&name)
     .bind(is_private)
     .bind(room_type)
     .bind(&now)
+    .bind(crate::layout::next_room_position(&s.pool).await)
     .execute(&s.pool)
     .await
     .map_err(|_| dberr())?;
@@ -247,7 +248,7 @@ pub async fn list_rooms_admin(
 ) -> Result<Json<serde_json::Value>, ApiErr> {
     check_owner(&headers, &s)?;
 
-    let rows = sqlx::query("SELECT id, name, is_private, room_type FROM rooms ORDER BY created_at ASC")
+    let rows = sqlx::query("SELECT id, name, is_private, room_type FROM rooms ORDER BY position, created_at")
         .fetch_all(&s.pool)
         .await
         .map_err(|_| dberr())?;
@@ -325,12 +326,13 @@ pub async fn create_board(
     let now = chrono::Utc::now().to_rfc3339();
 
     sqlx::query(
-        "INSERT INTO boards (id, room_id, name, created_at) VALUES (?, ?, ?, ?)",
+        "INSERT INTO boards (id, room_id, name, created_at, position) VALUES (?, ?, ?, ?, ?)",
     )
     .bind(&id)
     .bind(&body.room_id)
     .bind(&name)
     .bind(&now)
+    .bind(crate::layout::next_board_position(&s.pool, &body.room_id).await)
     .execute(&s.pool)
     .await
     .map_err(|_| dberr())?;

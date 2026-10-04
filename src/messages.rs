@@ -193,7 +193,7 @@ pub async fn join_channel(pool: &sqlx::SqlitePool) -> Option<String> {
         if exists { return Some(chosen); }
     }
     sqlx::query("SELECT b.id FROM boards b JOIN rooms r ON r.id = b.room_id
-                 WHERE r.room_type = 'text' ORDER BY r.created_at, b.created_at LIMIT 1")
+                 WHERE r.room_type = 'text' ORDER BY r.position, r.created_at, b.position, b.created_at LIMIT 1")
         .fetch_optional(pool).await.ok().flatten().map(|r| r.get("id"))
 }
 
@@ -765,7 +765,11 @@ pub async fn react(
         crate::roles::require(&s.pool, &username, crate::roles::ADD_REACTIONS, "add reactions").await?;
     }
     let emoji = body.emoji.trim().to_string();
-    if !valid_reaction_emoji(&emoji) {
+    let ok = match emoji.strip_prefix("c:") {
+        Some(id) => crate::emojis::exists(&s.pool, id).await, // a custom emoji, by id
+        None => valid_reaction_emoji(&emoji),
+    };
+    if !ok {
         return Err((StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": "Not a valid reaction" }))));
     }
     let row = sqlx::query("SELECT board_id FROM messages WHERE id = ?")

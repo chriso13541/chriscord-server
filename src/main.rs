@@ -1,8 +1,10 @@
 mod access;
 mod admin;
 mod invites;
+mod layout;
 mod auth;
 mod db;
+mod emojis;
 mod files;
 mod messages;
 mod pfp;
@@ -108,6 +110,8 @@ async fn main() {
     roles::init(&pool).await.expect("Failed to set up roles");
     access::init(&pool).await.expect("Failed to set up channel access");
     invites::init(&pool).await.expect("Failed to set up invites");
+    layout::init(&pool).await.expect("Failed to set up channel ordering");
+    emojis::init(&pool).await.expect("Failed to set up custom emoji");
 
     let owner_key =
         db::get_or_create_config(&pool, "owner_key", || utils::generate_hex(32))
@@ -173,6 +177,10 @@ async fn main() {
         .route("/api/admin/roles/:id",  put(roles::admin_update).delete(roles::admin_delete))
         .route("/api/admin/members/:username/roles", put(roles::admin_set_member_roles))
         .route("/api/roles",            get(roles::get_roles))
+        .route("/api/layout/rooms",     put(layout::order_rooms))
+        .route("/api/emojis",           get(emojis::list).post(emojis::upload))
+        .route("/api/emojis/:id",       get(emojis::image).patch(emojis::update).delete(emojis::remove))
+        .route("/api/layout/boards/:id", put(layout::move_board))
         .route("/api/invites",          post(invites::create))
         .route("/invite/:code",         get(invites::landing))
         .route("/api/members/:username/kick", post(roles::kick_member))

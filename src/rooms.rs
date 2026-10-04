@@ -65,7 +65,7 @@ pub async fn list_rooms(
     let visible = crate::access::visible_for(&s.pool, &username).await;
 
     let rows = sqlx::query(
-        "SELECT id, name, is_private, room_type FROM rooms ORDER BY created_at ASC",
+        "SELECT id, name, is_private, room_type FROM rooms ORDER BY position, created_at",
     )
     .fetch_all(&s.pool)
     .await
@@ -106,7 +106,7 @@ pub async fn list_boards(
     }
 
     let rows = sqlx::query(
-        "SELECT id, room_id, name, is_private FROM boards WHERE room_id = ? ORDER BY created_at ASC",
+        "SELECT id, room_id, name, is_private FROM boards WHERE room_id = ? ORDER BY position, created_at",
     )
     .bind(&room_id)
     .fetch_all(&s.pool)
