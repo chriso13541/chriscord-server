@@ -431,7 +431,7 @@ async fn handle_socket(socket: WebSocket, token: String, initial_status: Option<
                                 Some("rooms_updated") => true,
                                 Some("voice_state") => true,
                                 Some("roles_updated") => true,
-                                Some("emojis_updated") => true,
+                                Some("emojis_updated") | Some("stickers_updated") => true,
                                 Some("action_denied") => v["target"].as_str() == Some(username.as_str()),
                                 // Speaking rings are only for people in that same call —
                                 // someone just browsing the server still gets voice_state

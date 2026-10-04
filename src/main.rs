@@ -5,6 +5,7 @@ mod layout;
 mod auth;
 mod db;
 mod emojis;
+mod stickers;
 mod files;
 mod messages;
 mod pfp;
@@ -112,6 +113,7 @@ async fn main() {
     invites::init(&pool).await.expect("Failed to set up invites");
     layout::init(&pool).await.expect("Failed to set up channel ordering");
     emojis::init(&pool).await.expect("Failed to set up custom emoji");
+    stickers::init(&pool).await.expect("Failed to set up stickers");
 
     let owner_key =
         db::get_or_create_config(&pool, "owner_key", || utils::generate_hex(32))
@@ -181,6 +183,9 @@ async fn main() {
         .route("/api/emojis",           get(emojis::list).post(emojis::upload)
             .layer(DefaultBodyLimit::disable())) // emoji images have no size limit
         .route("/api/emojis/:id",       get(emojis::image).patch(emojis::update).delete(emojis::remove))
+        .route("/api/stickers",         get(stickers::list).post(stickers::upload)
+            .layer(DefaultBodyLimit::disable())) // no size limit, like emoji
+        .route("/api/stickers/:id",     get(stickers::image).patch(stickers::update).delete(stickers::remove))
         .route("/api/layout/boards/:id", put(layout::move_board))
         .route("/api/invites",          post(invites::create))
         .route("/invite/:code",         get(invites::landing))

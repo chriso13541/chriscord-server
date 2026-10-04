@@ -70,7 +70,7 @@ pub fn valid_name(name: &str) -> bool {
 }
 
 /// Ids are UUIDs: never let anything else near a file name.
-fn valid_id(id: &str) -> bool {
+pub(crate) fn valid_id(id: &str) -> bool {
     id.len() == 36 && id.bytes().all(|b| b.is_ascii_hexdigit() || b == b'-')
 }
 

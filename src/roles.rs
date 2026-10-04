@@ -52,7 +52,7 @@ fn catalog() -> serde_json::Value {
         { "bit": PIN_MESSAGES, "name": "Pin Messages", "about": "Pin and unpin messages in a channel." },
         { "bit": MANAGE_MESSAGES, "name": "Manage Messages", "about": "Delete other people's messages (and pin/unpin)." },
         { "bit": CONNECT, "name": "Connect to Voice", "about": "Join voice channels." },
-        { "bit": MANAGE_EMOJIS, "name": "Manage Emoji", "about": "Upload, rename, hide and delete the server's custom emoji." },
+        { "bit": MANAGE_EMOJIS, "name": "Manage Emoji & Stickers", "about": "Upload, rename, hide and delete the server's custom emoji and stickers." },
         { "bit": KICK_MEMBERS, "name": "Kick Members", "about": "Remove members with a lower role from the server. They can rejoin." },
         { "bit": BAN_MEMBERS, "name": "Ban Members", "about": "Remove members with a lower role and stop them rejoining." },
         { "bit": ADMINISTRATOR, "name": "Administrator", "about": "Every permission above. Give this out carefully." },
