@@ -33,8 +33,9 @@ use crate::{db, roles, state::AppState};
 type ApiErr = (StatusCode, Json<serde_json::Value>);
 
 const EMOJI_DIR: &str = "./emojis";
-/// Discord's limit is 256 KB; a little headroom for imports and APNGs.
-pub const MAX_EMOJI_BYTES: usize = 512 << 10;
+// No size limit on emoji images (the upload route turns off axum's body
+// limit too) — it's the server owner's disk, and only people with Manage
+// Emoji can upload. Clients cache each image once, by id.
 pub const MAX_EMOJI_COUNT: i64 = 1000;
 
 fn err(code: StatusCode, msg: &str) -> ApiErr {
@@ -199,9 +200,6 @@ pub async fn upload(
             .bind(did).fetch_optional(&s.pool).await.map_err(|_| dberr())? {
             return Ok(Json(row_json(&r)));
         }
-    }
-    if body.len() > MAX_EMOJI_BYTES {
-        return Err(bad("Emoji images must be 512 KB or smaller"));
     }
     let mime = match crate::pfp::image_mime(&body) {
         Some(m @ ("image/png" | "image/jpeg" | "image/gif" | "image/webp")) => m,

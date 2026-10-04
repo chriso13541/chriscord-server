@@ -178,7 +178,8 @@ async fn main() {
         .route("/api/admin/members/:username/roles", put(roles::admin_set_member_roles))
         .route("/api/roles",            get(roles::get_roles))
         .route("/api/layout/rooms",     put(layout::order_rooms))
-        .route("/api/emojis",           get(emojis::list).post(emojis::upload))
+        .route("/api/emojis",           get(emojis::list).post(emojis::upload)
+            .layer(DefaultBodyLimit::disable())) // emoji images have no size limit
         .route("/api/emojis/:id",       get(emojis::image).patch(emojis::update).delete(emojis::remove))
         .route("/api/layout/boards/:id", put(layout::move_board))
         .route("/api/invites",          post(invites::create))
