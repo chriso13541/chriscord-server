@@ -45,6 +45,10 @@ struct ClientMsg {
     speaking:        Option<bool>,
     muted:           Option<bool>,
     deafened:        Option<bool>,
+    /// voice_video: whether their camera is now on
+    video:           Option<bool>,
+    /// voice_keyframe: whose camera to ask for a keyframe
+    target:          Option<String>,
     pfp_updated_at:  Option<i64>,
     pfp_data:        Option<String>,
     profile_updated_at: Option<i64>,
@@ -184,6 +188,8 @@ async fn handle_socket(socket: WebSocket, token: String, initial_status: Option<
                                         // moving between channels needs no separate leave step.
                                         { state.voice.lock().unwrap().insert(username.clone(), bid.clone()); }
                                         { state.voice_reconnecting.lock().unwrap().remove(&username); } // back properly
+                                        // Cameras start off; the app says when it turns one on.
+                                        { video_on().lock().unwrap().remove(&username); }
                                         // Mute/deafen start as whatever the app says it is right
                                         // now — never carried over from an earlier session, which
                                         // is how someone could show as muted while talking.
@@ -281,6 +287,29 @@ async fn handle_socket(socket: WebSocket, token: String, initial_status: Option<
                                         // Dropped as stale — worth seeing if someone's ring
                                         // ever fails to show for everyone else.
                                         tracing::warn!("voice: ignoring speaking={speaking} from {username} for board {bid}: not in that voice channel");
+                                    }
+                                }
+                            }
+                            "voice_video" if !may_control_voice(&username, conn_id) => {}
+                            "voice_video" => {
+                                if let Some(bid) = cm.board_id {
+                                    let in_channel = { state.voice.lock().unwrap().get(&username) == Some(&bid) };
+                                    if in_channel {
+                                        let on = cm.video.unwrap_or(false);
+                                        {
+                                            let mut set = video_on().lock().unwrap();
+                                            if on { set.insert(username.clone()); } else { set.remove(&username); }
+                                        }
+                                        broadcast_voice_state(&state);
+                                    }
+                                }
+                            }
+                            "voice_keyframe" if !may_control_voice(&username, conn_id) => {}
+                            "voice_keyframe" => {
+                                if let (Some(bid), Some(target)) = (cm.board_id, cm.target) {
+                                    let in_channel = { state.voice.lock().unwrap().get(&username) == Some(&bid) };
+                                    if in_channel {
+                                        voice::request_keyframe(&state, &bid, &target).await;
                                     }
                                 }
                             }
@@ -553,6 +582,12 @@ fn voice_owners() -> &'static std::sync::Mutex<std::collections::HashMap<String,
     static OWNERS: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, u64>>> = std::sync::OnceLock::new();
     OWNERS.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
 }
+/// Who has their camera on (only meaningful while they're in a call —
+/// broadcast_voice_state lists just those still in one).
+fn video_on() -> &'static std::sync::Mutex<std::collections::HashSet<String>> {
+    static ON: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<String>>> = std::sync::OnceLock::new();
+    ON.get_or_init(|| std::sync::Mutex::new(std::collections::HashSet::new()))
+}
 fn voice_owner(user: &str) -> Option<u64> { voice_owners().lock().unwrap().get(user).copied() }
 /// True if this connection may act on the account's call: it's the owner,
 /// or nobody owns it right now.
@@ -579,8 +614,15 @@ fn broadcast_voice_state(state: &Arc<AppState>) {
             (u.clone(), serde_json::json!({ "muted": muted, "deafened": deafened }))
         }).collect()
     };
+    // Who's sharing a camera — only people actually in a call.
+    let video: Vec<String> = {
+        let voice = state.voice.lock().unwrap();
+        let on = video_on().lock().unwrap();
+        on.iter().filter(|u| voice.contains_key(*u)).cloned().collect()
+    };
     let _ = state.tx.send(serde_json::json!({
         "type": "voice_state", "channels": channels, "reconnecting": reconnecting, "mute_states": mute_states,
+        "video_on": video,
     }).to_string());
 }
 

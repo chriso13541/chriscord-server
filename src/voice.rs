@@ -40,9 +40,24 @@
 //     trigger a renegotiation to remove that participant's section — their
 //     track just stops producing audio, which is harmless and keeps this
 //     simpler; only joining requires proactively updating everyone else.
+//
+// Video (webcams) rides the same connections. A client's offer may carry
+// one extra send-only video section, AFTER all the audio placeholders (so
+// the by-position audio mapping above is untouched). Its packets only
+// start once that person turns their camera on — that's when on_track
+// fires for it, and the server makes a per-person video source just like
+// the audio one and renegotiates everyone else's connection to add it
+// (renegotiate_one handles audio and video together). Someone who joins
+// later gets everyone's existing video added by a renegotiation shortly
+// after their own answer. Turning a camera off just stops the packets;
+// whether a camera is on is signalled separately (voice_video in ws.rs),
+// which is what the apps go by. Video is only ever forwarded, never
+// decoded — a viewer whose picture needs a fresh start asks for a
+// keyframe (voice_keyframe), which reaches the sender as an RTCP PLI.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 use tokio::net::UdpSocket;
 use tokio::sync::Mutex as AsyncMutex;
 
@@ -58,6 +73,8 @@ use webrtc::ice_transport::ice_server::RTCIceServer;
 use webrtc::interceptor::registry::Registry;
 use webrtc::peer_connection::configuration::RTCConfiguration;
 use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
+use webrtc::peer_connection::signaling_state::RTCSignalingState;
+use webrtc::rtcp::payload_feedbacks::picture_loss_indication::PictureLossIndication;
 use webrtc::peer_connection::RTCPeerConnection;
 use webrtc::rtp_transceiver::rtp_transceiver_direction::RTCRtpTransceiverDirection;
 use webrtc::rtp_transceiver::rtp_codec::{RTCRtpCodecCapability, RTCRtpHeaderExtensionCapability, RTPCodecType};
@@ -164,6 +181,21 @@ pub struct VoiceRuntime {
     /// run more than once for the same participant without duplicating
     /// attachments.
     attached_peers: AsyncMutex<HashMap<ParticipantKey, HashSet<String>>>,
+    /// Each participant's forwarded webcam video, made the first time their
+    /// camera's packets arrive (see the design note at the top).
+    video_sources: AsyncMutex<HashMap<ParticipantKey, Arc<TrackLocalStaticRTP>>>,
+    /// The SSRC of each participant's incoming camera stream on their
+    /// current connection — where a keyframe request (PLI) has to point.
+    video_ssrc: AsyncMutex<HashMap<ParticipantKey, u32>>,
+    /// Like attached_peers, for video: whose camera each connection
+    /// already has a send-only video section for.
+    video_attached: AsyncMutex<HashMap<ParticipantKey, HashSet<String>>>,
+    /// One renegotiation at a time per connection — a connection has to be
+    /// back to "stable" (its last offer answered) before the next offer.
+    reneg_locks: AsyncMutex<HashMap<ParticipantKey, Arc<AsyncMutex<()>>>>,
+    /// When each camera was last asked for a keyframe, so a burst of
+    /// requests (several viewers at once) becomes one.
+    keyframe_last: AsyncMutex<HashMap<ParticipantKey, Instant>>,
 }
 
 impl VoiceRuntime {
@@ -196,6 +228,14 @@ impl VoiceRuntime {
                 None,
             )
             .expect("register mid header extension for audio");
+        // Same for video, which shares the bundle once cameras are on.
+        media_engine
+            .register_header_extension(
+                RTCRtpHeaderExtensionCapability { uri: SDES_MID_URI.to_owned() },
+                RTPCodecType::Video,
+                None,
+            )
+            .expect("register mid header extension for video");
         let mut registry = Registry::new();
         registry = register_default_interceptors(registry, &mut media_engine)
             .expect("register default interceptors");
@@ -291,6 +331,11 @@ impl VoiceRuntime {
             connections: AsyncMutex::new(HashMap::new()),
             sources: AsyncMutex::new(HashMap::new()),
             attached_peers: AsyncMutex::new(HashMap::new()),
+            video_sources: AsyncMutex::new(HashMap::new()),
+            video_ssrc: AsyncMutex::new(HashMap::new()),
+            video_attached: AsyncMutex::new(HashMap::new()),
+            reneg_locks: AsyncMutex::new(HashMap::new()),
+            keyframe_last: AsyncMutex::new(HashMap::new()),
         }
     }
 }
@@ -333,6 +378,8 @@ pub async fn handle_offer(
     if let Some(old_pc) = state.voice_runtime.connections.lock().await.remove(&key) {
         let _ = old_pc.close().await;
     }
+    // A fresh connection starts with none of anyone's video attached.
+    state.voice_runtime.video_attached.lock().await.remove(&key);
 
     let config = RTCConfiguration {
         // Note: with the muxed UDP port, webrtc-ice 0.11 skips STUN
@@ -401,11 +448,22 @@ pub async fn handle_offer(
     // that has attached this same track object receives these packets too.
     let forward_target = Arc::clone(&my_source);
     let username_for_track = username.to_string();
+    let state_for_track = Arc::clone(state);
+    let key_for_track = key.clone();
     pc.on_track(Box::new(
         move |remote: Arc<TrackRemote>, _receiver: Arc<RTCRtpReceiver>, _transceiver: Arc<RTCRtpTransceiver>| {
-            let forward_target = Arc::clone(&forward_target);
+            let audio_target = Arc::clone(&forward_target);
             let username_for_track = username_for_track.clone();
+            let state = Arc::clone(&state_for_track);
+            let key = key_for_track.clone();
             Box::pin(async move {
+                // Their camera (it only arrives once it's turned on), or their mic.
+                let forward_target = if remote.kind() == RTPCodecType::Video {
+                    tracing::info!("voice: {username_for_track}'s camera stream arrived");
+                    video_source_for(&state, &key, remote.ssrc()).await
+                } else {
+                    audio_target
+                };
                 loop {
                     match remote.read_rtp().await {
                         Ok((packet, _attrs)) => {
@@ -522,7 +580,28 @@ pub async fn handle_offer(
         .await
         .map_err(|e| format!("set_local_description failed: {e}"))?;
 
-    state.voice_runtime.connections.lock().await.insert(key, Arc::clone(&pc));
+    state.voice_runtime.connections.lock().await.insert(key.clone(), Arc::clone(&pc));
+
+    // Anyone on this board already sharing a camera: add their video to
+    // this connection with a renegotiation once this answer has landed.
+    let others_have_video = {
+        let videos = state.voice_runtime.video_sources.lock().await;
+        videos.keys().any(|(b, u)| b == board_id && u != username)
+    };
+    if others_have_video {
+        let state_for_video = Arc::clone(state);
+        let board_for_video = board_id.to_string();
+        let key_for_video = key.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(1500)).await;
+            let pc = state_for_video.voice_runtime.connections.lock().await.get(&key_for_video).cloned();
+            if let Some(pc) = pc {
+                if let Err(e) = renegotiate_one(&state_for_video, &key_for_video, &pc, &board_for_video).await {
+                    tracing::warn!("voice: adding existing cameras for {} failed: {e}", key_for_video.1);
+                }
+            }
+        });
+    }
 
     // A genuinely new participant (not a refresh/reconnect of an existing
     // one) — trigger seamless renegotiation on everyone else's EXISTING
@@ -573,16 +652,20 @@ async fn renegotiate_others_for_new_source(state: &Arc<AppState>, board_id: &str
 }
 
 /// Adds a transceiver (and attaches its audio) for every current board
-/// member this one connection doesn't already have one for, then
-/// renegotiates — create_offer/set_local_description on an ALREADY-
-/// established PeerConnection is exactly how WebRTC renegotiation works;
-/// nothing about the connection's existing transceivers, ICE state, or
-/// already-flowing audio is affected by adding more. Checking against
-/// attached_peers (rather than just adding one transceiver for the one
-/// participant that triggered this call) makes this self-healing: if a
-/// renegotiation for one new participant ever gets missed or races with
-/// another, the very next renegotiation for this same connection picks up
-/// anything still missing, rather than requiring perfect ordering.
+/// member this one connection doesn't already have one for — and likewise
+/// a video transceiver for every member sharing a camera it doesn't have
+/// yet — then renegotiates: create_offer/set_local_description on an
+/// ALREADY-established PeerConnection is exactly how WebRTC renegotiation
+/// works; nothing about the connection's existing transceivers, ICE state,
+/// or already-flowing media is affected by adding more. Checking against
+/// attached_peers / video_attached (rather than just adding the one thing
+/// that triggered this call) makes this self-healing: if a renegotiation
+/// ever gets missed or races with another, the very next one for this
+/// same connection picks up anything still missing.
+///
+/// One at a time per connection (reneg_locks), and only once its last
+/// offer has been answered (signaling state back to stable) — WebRTC
+/// doesn't allow a new offer while one is still outstanding.
 async fn renegotiate_one(
     state: &Arc<AppState>,
     key: &ParticipantKey,
@@ -590,6 +673,21 @@ async fn renegotiate_one(
     board_id: &str,
 ) -> Result<(), String> {
     let username = &key.1;
+    let lock = {
+        let mut locks = state.voice_runtime.reneg_locks.lock().await;
+        Arc::clone(locks.entry(key.clone()).or_default())
+    };
+    let _one_at_a_time = lock.lock().await;
+    for _ in 0..40 {
+        if pc.signaling_state() == RTCSignalingState::Stable {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+    if pc.signaling_state() != RTCSignalingState::Stable {
+        return Err("still waiting on the answer to an earlier renegotiation".to_string());
+    }
+
     let board_members: Vec<String> = {
         let voice = state.voice.lock().unwrap();
         voice
@@ -607,13 +705,23 @@ async fn renegotiate_one(
     let missing: Vec<String> = {
         let attached = state.voice_runtime.attached_peers.lock().await;
         let already = attached.get(key).cloned().unwrap_or_default();
-        board_members.into_iter().filter(|u| !already.contains(u)).collect()
+        board_members.iter().filter(|u| !already.contains(*u)).cloned().collect()
     };
-    if missing.is_empty() {
+    let missing_video: Vec<String> = {
+        let attached = state.voice_runtime.video_attached.lock().await;
+        let already = attached.get(key).cloned().unwrap_or_default();
+        let videos = state.voice_runtime.video_sources.lock().await;
+        board_members
+            .iter()
+            .filter(|u| !already.contains(*u) && videos.contains_key(&(board_id.to_string(), (*u).clone())))
+            .cloned()
+            .collect()
+    };
+    if missing.is_empty() && missing_video.is_empty() {
         tracing::info!("voice: renegotiate_one for {username}: nothing missing, no-op");
         return Ok(());
     }
-    tracing::info!("voice: renegotiate_one for {username}: missing={missing:?}");
+    tracing::info!("voice: renegotiate_one for {username}: missing audio={missing:?} video={missing_video:?}");
 
     let mut newly_attached = Vec::new();
     {
@@ -641,7 +749,29 @@ async fn renegotiate_one(
             newly_attached.push(other.clone());
         }
     }
-    if newly_attached.is_empty() {
+    let mut newly_video = Vec::new();
+    {
+        let videos = state.voice_runtime.video_sources.lock().await;
+        for other in &missing_video {
+            let Some(track) = videos.get(&(board_id.to_string(), other.clone())) else { continue };
+            let transceiver = pc
+                .add_transceiver_from_kind(
+                    RTPCodecType::Video,
+                    Some(RTCRtpTransceiverInit { direction: RTCRtpTransceiverDirection::Recvonly, send_encodings: vec![] }),
+                )
+                .await
+                .map_err(|e| format!("add video transceiver for {other}: {e}"))?;
+            let track_dyn: Arc<dyn TrackLocal + Send + Sync> = Arc::clone(track) as _;
+            let sender = transceiver.sender().await;
+            transceiver
+                .set_sender_track(sender, Some(track_dyn))
+                .await
+                .map_err(|e| format!("set video sender track for {other}: {e}"))?;
+            transceiver.set_direction(RTCRtpTransceiverDirection::Sendonly).await;
+            newly_video.push(other.clone());
+        }
+    }
+    if newly_attached.is_empty() && newly_video.is_empty() {
         tracing::info!("voice: renegotiate_one for {username}: everyone missing was still mid-negotiation, no-op this round");
         return Ok(()); // everyone missing was still mid-negotiation — nothing to renegotiate yet
     }
@@ -651,18 +781,93 @@ async fn renegotiate_one(
         .await
         .map_err(|e| format!("set_local_description: {e}"))?;
 
-    {
+    if !newly_attached.is_empty() {
         let mut attached = state.voice_runtime.attached_peers.lock().await;
         attached.entry(key.clone()).or_default().extend(newly_attached.clone());
     }
+    if !newly_video.is_empty() {
+        let mut attached = state.voice_runtime.video_attached.lock().await;
+        attached.entry(key.clone()).or_default().extend(newly_video.clone());
+    }
 
-    tracing::info!("voice: renegotiate_one sending offer to {username}, newly attached: {newly_attached:?}");
+    tracing::info!("voice: renegotiate_one sending offer to {username}, newly attached: audio={newly_attached:?} video={newly_video:?}");
     crate::ws::send_to_user(
         state,
         username,
         serde_json::json!({ "type": "voice_renegotiate", "board_id": board_id, "sdp": offer.sdp }),
     );
+
+    // The new viewer needs a keyframe to start each picture: ask those
+    // cameras for one once the renegotiation has had a moment to land.
+    if !newly_video.is_empty() {
+        let state_for_kf = Arc::clone(state);
+        let board_for_kf = board_id.to_string();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(1200)).await;
+            for other in newly_video {
+                request_keyframe(&state_for_kf, &board_for_kf, &other).await;
+            }
+        });
+    }
     Ok(())
+}
+
+/// The shared outgoing video source for one participant's camera — made
+/// the first time it's needed, after which everyone else on the board is
+/// renegotiated to receive it. Also records the camera stream's SSRC on
+/// their current connection, for keyframe requests.
+async fn video_source_for(state: &Arc<AppState>, key: &ParticipantKey, ssrc: u32) -> Arc<TrackLocalStaticRTP> {
+    state.voice_runtime.video_ssrc.lock().await.insert(key.clone(), ssrc);
+    let (source, fresh) = {
+        let mut videos = state.voice_runtime.video_sources.lock().await;
+        match videos.get(key) {
+            Some(existing) => (Arc::clone(existing), false),
+            None => {
+                let username = &key.1;
+                let fresh = Arc::new(TrackLocalStaticRTP::new(
+                    RTCRtpCodecCapability {
+                        mime_type: "video/VP8".to_owned(),
+                        clock_rate: 90000,
+                        ..Default::default()
+                    },
+                    format!("video-{username}"),
+                    format!("chriscord-{username}"),
+                ));
+                videos.insert(key.clone(), Arc::clone(&fresh));
+                (fresh, true)
+            }
+        }
+    };
+    if fresh {
+        let state = Arc::clone(state);
+        let (board_id, username) = key.clone();
+        tokio::spawn(async move {
+            renegotiate_others_for_new_source(&state, &board_id, &username).await;
+        });
+    }
+    source
+}
+
+/// Asks a participant's camera for a fresh keyframe (RTCP PLI) — what a
+/// viewer needs to start or recover its picture. At most one request per
+/// camera every half second; extra ones are dropped.
+pub async fn request_keyframe(state: &Arc<AppState>, board_id: &str, username: &str) {
+    let key: ParticipantKey = (board_id.to_string(), username.to_string());
+    {
+        let mut last = state.voice_runtime.keyframe_last.lock().await;
+        let now = Instant::now();
+        if last.get(&key).map_or(false, |t| now.duration_since(*t) < Duration::from_millis(500)) {
+            return;
+        }
+        last.insert(key.clone(), now);
+    }
+    let Some(ssrc) = state.voice_runtime.video_ssrc.lock().await.get(&key).copied() else { return };
+    let Some(pc) = state.voice_runtime.connections.lock().await.get(&key).cloned() else { return };
+    let pli: Box<dyn webrtc::rtcp::packet::Packet + Send + Sync> =
+        Box::new(PictureLossIndication { sender_ssrc: 0, media_ssrc: ssrc });
+    if let Err(e) = pc.write_rtcp(&[pli]).await {
+        tracing::debug!("voice: keyframe request to {username} failed: {e}");
+    }
 }
 
 /// Applies the client's answer to a server-initiated renegotiation (see
@@ -721,6 +926,17 @@ pub async fn close_participant(state: &Arc<AppState>, board_id: &str, username: 
         let _ = pc.close().await;
     }
     state.voice_runtime.sources.lock().await.remove(&key);
+    state.voice_runtime.video_sources.lock().await.remove(&key);
+    state.voice_runtime.video_ssrc.lock().await.remove(&key);
+    state.voice_runtime.reneg_locks.lock().await.remove(&key);
+    state.voice_runtime.keyframe_last.lock().await.remove(&key);
+    {
+        let mut attached = state.voice_runtime.video_attached.lock().await;
+        attached.remove(&key);
+        for set in attached.values_mut() {
+            set.remove(username);
+        }
+    }
     // Also drop any references to this participant from everyone else's
     // attached_peers sets — otherwise, if they rejoin later (with a fresh
     // source object), renegotiation would wrongly think everyone already
