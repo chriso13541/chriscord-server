@@ -211,6 +211,11 @@ pub struct VoiceRuntime {
     screen_senders: AsyncMutex<HashMap<ParticipantKey, HashMap<String, ScreenSlot>>>,
     /// Like keyframe_last, for screens.
     screen_keyframe_last: AsyncMutex<HashMap<ParticipantKey, Instant>>,
+    /// A screen share's sound (the app's "screenaudio" track), forwarded
+    /// alongside the picture to the same people — those watching.
+    screen_audio_sources: AsyncMutex<HashMap<ParticipantKey, Arc<TrackLocalStaticRTP>>>,
+    /// Like screen_senders, for that sound's send-only audio sections.
+    screen_audio_senders: AsyncMutex<HashMap<ParticipantKey, HashMap<String, ScreenSlot>>>,
     /// One renegotiation at a time per connection — a connection has to be
     /// back to "stable" (its last offer answered) before the next offer.
     reneg_locks: AsyncMutex<HashMap<ParticipantKey, Arc<AsyncMutex<()>>>>,
@@ -362,6 +367,8 @@ impl VoiceRuntime {
             screen_watch: AsyncMutex::new(HashMap::new()),
             screen_senders: AsyncMutex::new(HashMap::new()),
             screen_keyframe_last: AsyncMutex::new(HashMap::new()),
+            screen_audio_sources: AsyncMutex::new(HashMap::new()),
+            screen_audio_senders: AsyncMutex::new(HashMap::new()),
         }
     }
 }
@@ -407,6 +414,7 @@ pub async fn handle_offer(
     // A fresh connection starts with none of anyone's video attached.
     state.voice_runtime.video_attached.lock().await.remove(&key);
     state.voice_runtime.screen_senders.lock().await.remove(&key);
+    state.voice_runtime.screen_audio_senders.lock().await.remove(&key);
 
     let config = RTCConfiguration {
         // Note: with the muxed UDP port, webrtc-ice 0.11 skips STUN
@@ -488,7 +496,14 @@ pub async fn handle_offer(
                 // The app names its screen track "screen" (its camera is "video").
                 let is_screen = remote.kind() == RTPCodecType::Video
                     && (remote.id() == "screen" || remote.stream_id() == "chriscord-screen");
-                let forward_target = if is_screen {
+                let is_screen_audio = remote.kind() == RTPCodecType::Audio && remote.id() == "screenaudio";
+                let forward_target = if is_screen_audio {
+                    tracing::info!("voice: {username_for_track}'s screen share sound arrived");
+                    match screen_audio_source_for(&state, &key, remote.codec().capability).await {
+                        Some(t) => t,
+                        None => return,
+                    }
+                } else if is_screen {
                     tracing::info!("voice: {username_for_track}'s screen share stream arrived");
                     match screen_source_for(&state, &key, remote.ssrc(), remote.codec().capability).await {
                         Some(t) => t,
@@ -768,26 +783,18 @@ async fn renegotiate_one(
             .cloned()
             .collect()
     };
-    // Screens they've asked to watch that have no section on this connection yet.
-    let missing_screen: Vec<String> = {
-        let watch = state.voice_runtime.screen_watch.lock().await.get(key).cloned().unwrap_or_default();
-        let senders = state.voice_runtime.screen_senders.lock().await;
-        let have = senders.get(key);
-        let sources = state.voice_runtime.screen_sources.lock().await;
-        watch
-            .into_iter()
-            .filter(|u| {
-                board_members.contains(u)
-                    && sources.contains_key(&(board_id.to_string(), u.clone()))
-                    && !have.map_or(false, |h| h.contains_key(u))
-            })
-            .collect()
-    };
-    if missing.is_empty() && missing_video.is_empty() && missing_screen.is_empty() {
+    // Screens (and their sound) they've asked to watch that have no section
+    // on this connection yet.
+    let rt = &state.voice_runtime;
+    let missing_screen =
+        missing_screen_parts(rt, key, board_id, &board_members, &rt.screen_sources, &rt.screen_senders).await;
+    let missing_screen_audio =
+        missing_screen_parts(rt, key, board_id, &board_members, &rt.screen_audio_sources, &rt.screen_audio_senders).await;
+    if missing.is_empty() && missing_video.is_empty() && missing_screen.is_empty() && missing_screen_audio.is_empty() {
         tracing::info!("voice: renegotiate_one for {username}: nothing missing, no-op");
         return Ok(());
     }
-    tracing::info!("voice: renegotiate_one for {username}: missing audio={missing:?} video={missing_video:?} screens={missing_screen:?}");
+    tracing::info!("voice: renegotiate_one for {username}: missing audio={missing:?} video={missing_video:?} screens={missing_screen:?} screen sound={missing_screen_audio:?}");
 
     let mut newly_attached = Vec::new();
     {
@@ -837,34 +844,15 @@ async fn renegotiate_one(
             newly_video.push(other.clone());
         }
     }
-    let mut newly_screen = Vec::new();
-    {
-        let sources = state.voice_runtime.screen_sources.lock().await;
-        let mut senders = state.voice_runtime.screen_senders.lock().await;
-        for other in &missing_screen {
-            let Some(track) = sources.get(&(board_id.to_string(), other.clone())) else { continue };
-            let transceiver = pc
-                .add_transceiver_from_kind(
-                    RTPCodecType::Video,
-                    Some(RTCRtpTransceiverInit { direction: RTCRtpTransceiverDirection::Recvonly, send_encodings: vec![] }),
-                )
-                .await
-                .map_err(|e| format!("add screen transceiver for {other}: {e}"))?;
-            let track_dyn: Arc<dyn TrackLocal + Send + Sync> = Arc::clone(track) as _;
-            let sender = transceiver.sender().await;
-            transceiver
-                .set_sender_track(sender, Some(track_dyn))
-                .await
-                .map_err(|e| format!("set screen sender track for {other}: {e}"))?;
-            transceiver.set_direction(RTCRtpTransceiverDirection::Sendonly).await;
-            senders
-                .entry(key.clone())
-                .or_default()
-                .insert(other.clone(), ScreenSlot { transceiver, playing: Some(Arc::clone(track)) });
-            newly_screen.push(other.clone());
-        }
-    }
-    if newly_attached.is_empty() && newly_video.is_empty() && newly_screen.is_empty() {
+    let newly_screen = add_screen_sections(
+        pc, key, board_id, &missing_screen, RTPCodecType::Video, &rt.screen_sources, &rt.screen_senders,
+    )
+    .await?;
+    let newly_screen_audio = add_screen_sections(
+        pc, key, board_id, &missing_screen_audio, RTPCodecType::Audio, &rt.screen_audio_sources, &rt.screen_audio_senders,
+    )
+    .await?;
+    if newly_attached.is_empty() && newly_video.is_empty() && newly_screen.is_empty() && newly_screen_audio.is_empty() {
         tracing::info!("voice: renegotiate_one for {username}: everyone missing was still mid-negotiation, no-op this round");
         return Ok(()); // everyone missing was still mid-negotiation — nothing to renegotiate yet
     }
@@ -883,7 +871,7 @@ async fn renegotiate_one(
         attached.entry(key.clone()).or_default().extend(newly_video.clone());
     }
 
-    tracing::info!("voice: renegotiate_one sending offer to {username}, newly attached: audio={newly_attached:?} video={newly_video:?} screens={newly_screen:?}");
+    tracing::info!("voice: renegotiate_one sending offer to {username}, newly attached: audio={newly_attached:?} video={newly_video:?} screens={newly_screen:?} screen sound={newly_screen_audio:?}");
     crate::ws::send_to_user(
         state,
         username,
@@ -1087,43 +1075,9 @@ pub async fn screen_stopped(state: &Arc<AppState>, board_id: &str, sharer: &str)
 async fn apply_screens(state: &Arc<AppState>, key: &ParticipantKey) {
     let Some(pc) = state.voice_runtime.connections.lock().await.get(key).cloned() else { return };
     let watch = state.voice_runtime.screen_watch.lock().await.get(key).cloned().unwrap_or_default();
-    let sources: HashMap<String, Arc<TrackLocalStaticRTP>> = {
-        let screens = state.voice_runtime.screen_sources.lock().await;
-        screens
-            .iter()
-            .filter(|((b, _), _)| *b == key.0)
-            .map(|((_, u), t)| (u.clone(), Arc::clone(t)))
-            .collect()
-    };
-    let mut started = Vec::new();
-    let needs_new = {
-        let mut senders = state.voice_runtime.screen_senders.lock().await;
-        let slots = senders.entry(key.clone()).or_default();
-        for (sharer, slot) in slots.iter_mut() {
-            let want = if watch.contains(sharer) { sources.get(sharer).cloned() } else { None };
-            let same = match (&want, &slot.playing) {
-                (Some(a), Some(b)) => Arc::ptr_eq(a, b),
-                (None, None) => true,
-                _ => false,
-            };
-            if same {
-                continue;
-            }
-            let sender = slot.transceiver.sender().await;
-            let track: Option<Arc<dyn TrackLocal + Send + Sync>> =
-                want.clone().map(|t| t as Arc<dyn TrackLocal + Send + Sync>);
-            match sender.replace_track(track).await {
-                Ok(()) => {
-                    if want.is_some() {
-                        started.push(sharer.clone());
-                    }
-                    slot.playing = want;
-                }
-                Err(e) => tracing::warn!("voice: switching {sharer}'s screen for {}: {e}", key.1),
-            }
-        }
-        watch.iter().any(|s| sources.contains_key(s) && !slots.contains_key(s))
-    };
+    let rt = &state.voice_runtime;
+    let (started, new_video) = sync_screen_slots(key, &watch, &rt.screen_sources, &rt.screen_senders).await;
+    let (_, new_audio) = sync_screen_slots(key, &watch, &rt.screen_audio_sources, &rt.screen_audio_senders).await;
     if !started.is_empty() {
         let state = Arc::clone(state);
         let board_id = key.0.clone();
@@ -1134,11 +1088,167 @@ async fn apply_screens(state: &Arc<AppState>, key: &ParticipantKey) {
             }
         });
     }
-    if needs_new {
+    if new_video || new_audio {
         if let Err(e) = renegotiate_one(state, key, &pc, &key.0).await {
             tracing::warn!("voice: adding a screen for {} failed: {e}", key.1);
         }
     }
+}
+
+/// One half of apply_screens (the picture, or the sound): switches this
+/// viewer's existing sections on or off to match what they're watching.
+/// Returns the sharers that just started, and whether a watched one has
+/// no section yet (a renegotiation is needed).
+async fn sync_screen_slots(
+    key: &ParticipantKey,
+    watch: &HashSet<String>,
+    sources_map: &AsyncMutex<HashMap<ParticipantKey, Arc<TrackLocalStaticRTP>>>,
+    senders_map: &AsyncMutex<HashMap<ParticipantKey, HashMap<String, ScreenSlot>>>,
+) -> (Vec<String>, bool) {
+    let sources: HashMap<String, Arc<TrackLocalStaticRTP>> = {
+        let all = sources_map.lock().await;
+        all.iter()
+            .filter(|((b, _), _)| *b == key.0)
+            .map(|((_, u), t)| (u.clone(), Arc::clone(t)))
+            .collect()
+    };
+    let mut started = Vec::new();
+    let mut senders = senders_map.lock().await;
+    let slots = senders.entry(key.clone()).or_default();
+    for (sharer, slot) in slots.iter_mut() {
+        let want = if watch.contains(sharer) { sources.get(sharer).cloned() } else { None };
+        let same = match (&want, &slot.playing) {
+            (Some(a), Some(b)) => Arc::ptr_eq(a, b),
+            (None, None) => true,
+            _ => false,
+        };
+        if same {
+            continue;
+        }
+        let sender = slot.transceiver.sender().await;
+        let track: Option<Arc<dyn TrackLocal + Send + Sync>> =
+            want.clone().map(|t| t as Arc<dyn TrackLocal + Send + Sync>);
+        match sender.replace_track(track).await {
+            Ok(()) => {
+                if want.is_some() {
+                    started.push(sharer.clone());
+                }
+                slot.playing = want;
+            }
+            Err(e) => tracing::warn!("voice: switching {sharer}'s screen for {}: {e}", key.1),
+        }
+    }
+    let needs_new = watch.iter().any(|s| sources.contains_key(s) && !slots.contains_key(s));
+    (started, needs_new)
+}
+
+/// Watched screens (or screen sounds) this connection has no section for.
+async fn missing_screen_parts(
+    rt: &VoiceRuntime,
+    key: &ParticipantKey,
+    board_id: &str,
+    board_members: &[String],
+    sources_map: &AsyncMutex<HashMap<ParticipantKey, Arc<TrackLocalStaticRTP>>>,
+    senders_map: &AsyncMutex<HashMap<ParticipantKey, HashMap<String, ScreenSlot>>>,
+) -> Vec<String> {
+    let watch = rt.screen_watch.lock().await.get(key).cloned().unwrap_or_default();
+    let senders = senders_map.lock().await;
+    let have = senders.get(key);
+    let sources = sources_map.lock().await;
+    watch
+        .into_iter()
+        .filter(|u| {
+            board_members.contains(u)
+                && sources.contains_key(&(board_id.to_string(), u.clone()))
+                && !have.map_or(false, |h| h.contains_key(u))
+        })
+        .collect()
+}
+
+/// Adds a send-only section (video for a screen, audio for its sound) for
+/// each of `missing` to this connection, playing their current source.
+async fn add_screen_sections(
+    pc: &Arc<RTCPeerConnection>,
+    key: &ParticipantKey,
+    board_id: &str,
+    missing: &[String],
+    kind: RTPCodecType,
+    sources_map: &AsyncMutex<HashMap<ParticipantKey, Arc<TrackLocalStaticRTP>>>,
+    senders_map: &AsyncMutex<HashMap<ParticipantKey, HashMap<String, ScreenSlot>>>,
+) -> Result<Vec<String>, String> {
+    let mut added = Vec::new();
+    let sources = sources_map.lock().await;
+    let mut senders = senders_map.lock().await;
+    for other in missing {
+        let Some(track) = sources.get(&(board_id.to_string(), other.clone())) else { continue };
+        let transceiver = pc
+            .add_transceiver_from_kind(
+                kind,
+                Some(RTCRtpTransceiverInit { direction: RTCRtpTransceiverDirection::Recvonly, send_encodings: vec![] }),
+            )
+            .await
+            .map_err(|e| format!("add screen {kind} section for {other}: {e}"))?;
+        let track_dyn: Arc<dyn TrackLocal + Send + Sync> = Arc::clone(track) as _;
+        let sender = transceiver.sender().await;
+        transceiver
+            .set_sender_track(sender, Some(track_dyn))
+            .await
+            .map_err(|e| format!("set screen {kind} track for {other}: {e}"))?;
+        transceiver.set_direction(RTCRtpTransceiverDirection::Sendonly).await;
+        senders
+            .entry(key.clone())
+            .or_default()
+            .insert(other.clone(), ScreenSlot { transceiver, playing: Some(Arc::clone(track)) });
+        added.push(other.clone());
+    }
+    Ok(added)
+}
+
+/// The shared outgoing source for a screen share's sound — like
+/// screen_source_for, for the "screenaudio" track.
+async fn screen_audio_source_for(
+    state: &Arc<AppState>,
+    key: &ParticipantKey,
+    codec: RTCRtpCodecCapability,
+) -> Option<Arc<TrackLocalStaticRTP>> {
+    let in_call = { state.voice.lock().unwrap().get(&key.1) == Some(&key.0) };
+    if !in_call {
+        return None;
+    }
+    let (source, fresh) = {
+        let mut all = state.voice_runtime.screen_audio_sources.lock().await;
+        match all.get(key) {
+            Some(existing) if existing.codec().mime_type.eq_ignore_ascii_case(&codec.mime_type) => {
+                (Arc::clone(existing), false)
+            }
+            _ => {
+                let username = &key.1;
+                let fresh = Arc::new(TrackLocalStaticRTP::new(
+                    RTCRtpCodecCapability {
+                        mime_type: codec.mime_type.clone(),
+                        clock_rate: codec.clock_rate,
+                        channels: codec.channels,
+                        sdp_fmtp_line: codec.sdp_fmtp_line.clone(),
+                        rtcp_feedback: vec![],
+                    },
+                    format!("screenaudio-{username}"),
+                    format!("chriscord-{username}"),
+                ));
+                all.insert(key.clone(), Arc::clone(&fresh));
+                (fresh, true)
+            }
+        }
+    };
+    if fresh {
+        let state = Arc::clone(state);
+        let (board_id, sharer) = key.clone();
+        tokio::spawn(async move {
+            for viewer in screen_watchers(&state, &board_id, &sharer).await {
+                apply_screens(&state, &(board_id.clone(), viewer)).await;
+            }
+        });
+    }
+    Some(source)
 }
 
 /// Asks a participant's camera for a fresh keyframe (RTCP PLI) — what a
@@ -1245,6 +1355,8 @@ pub async fn close_participant(state: &Arc<AppState>, board_id: &str, username: 
     state.voice_runtime.screen_ssrc.lock().await.remove(&key);
     state.voice_runtime.screen_keyframe_last.lock().await.remove(&key);
     state.voice_runtime.screen_senders.lock().await.remove(&key);
+    state.voice_runtime.screen_audio_sources.lock().await.remove(&key);
+    state.voice_runtime.screen_audio_senders.lock().await.remove(&key);
     {
         let mut watch = state.voice_runtime.screen_watch.lock().await;
         watch.remove(&key);
