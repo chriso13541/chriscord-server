@@ -1151,18 +1151,19 @@ async fn missing_screen_parts(
     sources_map: &AsyncMutex<HashMap<ParticipantKey, Arc<TrackLocalStaticRTP>>>,
     senders_map: &AsyncMutex<HashMap<ParticipantKey, HashMap<String, ScreenSlot>>>,
 ) -> Vec<String> {
+    // One lock at a time: add_screen_sections takes sources then senders,
+    // so holding senders while waiting for sources here could deadlock.
     let watch = rt.screen_watch.lock().await.get(key).cloned().unwrap_or_default();
+    let live: Vec<String> = {
+        let sources = sources_map.lock().await;
+        watch
+            .into_iter()
+            .filter(|u| board_members.contains(u) && sources.contains_key(&(board_id.to_string(), u.clone())))
+            .collect()
+    };
     let senders = senders_map.lock().await;
     let have = senders.get(key);
-    let sources = sources_map.lock().await;
-    watch
-        .into_iter()
-        .filter(|u| {
-            board_members.contains(u)
-                && sources.contains_key(&(board_id.to_string(), u.clone()))
-                && !have.map_or(false, |h| h.contains_key(u))
-        })
-        .collect()
+    live.into_iter().filter(|u| !have.map_or(false, |h| h.contains_key(u))).collect()
 }
 
 /// Adds a send-only section (video for a screen, audio for its sound) for
