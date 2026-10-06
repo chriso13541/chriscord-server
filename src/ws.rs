@@ -55,6 +55,10 @@ struct ClientMsg {
     watch:           Option<bool>,
     /// voice_keyframe: "screen" for a screen share, else their camera
     kind:            Option<String>,
+    /// voice_watch: the most they want to receive (both set, or neither:
+    /// as shared); voice_screen_native: what they're sharing at
+    height:          Option<u32>,
+    fps:             Option<u32>,
     pfp_updated_at:  Option<i64>,
     pfp_data:        Option<String>,
     profile_updated_at: Option<i64>,
@@ -333,7 +337,20 @@ async fn handle_socket(socket: WebSocket, token: String, initial_status: Option<
                                 if let (Some(bid), Some(target)) = (cm.board_id, cm.target) {
                                     let in_channel = { state.voice.lock().unwrap().get(&username) == Some(&bid) };
                                     if in_channel {
-                                        voice::set_watch(&state, &bid, &username, &target, cm.watch.unwrap_or(false)).await;
+                                        let limit = match (cm.height, cm.fps) {
+                                            (Some(h), Some(f)) if h > 0 && f > 0 => Some(voice::ScreenSize { height: h, fps: f }),
+                                            _ => None,
+                                        };
+                                        voice::set_watch(&state, &bid, &username, &target, cm.watch.unwrap_or(false), limit).await;
+                                    }
+                                }
+                            }
+                            "voice_screen_native" if !may_control_voice(&username, conn_id) => {}
+                            "voice_screen_native" => {
+                                if let (Some(bid), Some(h), Some(f)) = (cm.board_id, cm.height, cm.fps) {
+                                    let in_channel = { state.voice.lock().unwrap().get(&username) == Some(&bid) };
+                                    if in_channel && h > 0 && f > 0 {
+                                        voice::set_screen_native(&state, &bid, &username, voice::ScreenSize { height: h, fps: f }).await;
                                     }
                                 }
                             }
@@ -514,7 +531,7 @@ async fn handle_socket(socket: WebSocket, token: String, initial_status: Option<
                                 Some("message_edit") | Some("message_delete") | Some("message_pin") | Some("message_reaction") => subscribed_board.as_deref()
                                     .map(|bid| v["board_id"].as_str() == Some(bid))
                                     .unwrap_or(false),
-                                Some("voice_answer") | Some("voice_ice") | Some("voice_status_snapshot") | Some("voice_renegotiate") =>
+                                Some("voice_answer") | Some("voice_ice") | Some("voice_status_snapshot") | Some("voice_renegotiate") | Some("voice_screen_low") =>
                                     v["target"].as_str() == Some(username.as_str()) && may_control_voice(&username, conn_id),
                                 Some("pfp_request") | Some("profile_request") =>
                                     v["target"].as_str() == Some(username.as_str()),

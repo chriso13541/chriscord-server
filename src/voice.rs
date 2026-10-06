@@ -54,6 +54,16 @@
 // which is what the apps go by. Video is only ever forwarded, never
 // decoded — a viewer whose picture needs a fresh start asks for a
 // keyframe (voice_keyframe), which reaches the sender as an RTCP PLI.
+//
+// Screens can come in two versions. A viewer may ask to watch at no more
+// than some size and frame rate (voice_watch's height/fps — the app's
+// "Override stream native settings"). When anyone watching a screen wants
+// less than it's shared at, the sharer is asked (voice_screen_low) to send
+// a second, smaller version on its "screenlow" section, at the largest size
+// and frame rate any of them asked for; those viewers are sent that one,
+// everyone else the full one. When nobody wants it any more, the sharer is
+// told to stop it. Moving a viewer between the two gives them a new
+// section (see forget_screen_slots for why a section can't switch).
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -168,7 +178,17 @@ fn public_candidate_copy(candidate: &str, public_ip: &str) -> Option<String> {
 /// One screen's send-only section on a viewer's connection.
 struct ScreenSlot {
     transceiver: Arc<RTCRtpTransceiver>,
+    /// The stream this section was made for — the only one it can play.
+    source: Arc<TrackLocalStaticRTP>,
     playing: Option<Arc<TrackLocalStaticRTP>>,
+}
+
+/// A size and frame rate: a viewer's limit, a share's own, or what the
+/// smaller version is asked to be.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct ScreenSize {
+    pub height: u32,
+    pub fps: u32,
 }
 
 pub struct VoiceRuntime {
@@ -211,6 +231,16 @@ pub struct VoiceRuntime {
     screen_senders: AsyncMutex<HashMap<ParticipantKey, HashMap<String, ScreenSlot>>>,
     /// Like keyframe_last, for screens.
     screen_keyframe_last: AsyncMutex<HashMap<ParticipantKey, Instant>>,
+    /// Each sharer's smaller version of their screen (their "screenlow"
+    /// section), while someone watching wants one — see the design note.
+    screen_low_sources: AsyncMutex<HashMap<ParticipantKey, Arc<TrackLocalStaticRTP>>>,
+    screen_low_ssrc: AsyncMutex<HashMap<ParticipantKey, u32>>,
+    /// The most each viewer wants to receive (absent: screens as shared).
+    screen_view: AsyncMutex<HashMap<ParticipantKey, ScreenSize>>,
+    /// What each sharer is sharing at (voice_screen_native).
+    screen_native: AsyncMutex<HashMap<ParticipantKey, ScreenSize>>,
+    /// The smaller version each sharer was last asked for.
+    screen_low_asked: AsyncMutex<HashMap<ParticipantKey, ScreenSize>>,
     /// A screen share's sound (the app's "screenaudio" track), forwarded
     /// alongside the picture to the same people — those watching.
     screen_audio_sources: AsyncMutex<HashMap<ParticipantKey, Arc<TrackLocalStaticRTP>>>,
@@ -367,6 +397,11 @@ impl VoiceRuntime {
             screen_watch: AsyncMutex::new(HashMap::new()),
             screen_senders: AsyncMutex::new(HashMap::new()),
             screen_keyframe_last: AsyncMutex::new(HashMap::new()),
+            screen_low_sources: AsyncMutex::new(HashMap::new()),
+            screen_low_ssrc: AsyncMutex::new(HashMap::new()),
+            screen_view: AsyncMutex::new(HashMap::new()),
+            screen_native: AsyncMutex::new(HashMap::new()),
+            screen_low_asked: AsyncMutex::new(HashMap::new()),
             screen_audio_sources: AsyncMutex::new(HashMap::new()),
             screen_audio_senders: AsyncMutex::new(HashMap::new()),
         }
@@ -494,12 +529,20 @@ pub async fn handle_offer(
             Box::pin(async move {
                 // Their camera (it only arrives once it's turned on), or their mic.
                 // The app names its screen track "screen" (its camera is "video").
-                let is_screen = remote.kind() == RTPCodecType::Video
+                let is_screen_low = remote.kind() == RTPCodecType::Video && remote.id() == "screenlow";
+                let is_screen = !is_screen_low
+                    && remote.kind() == RTPCodecType::Video
                     && (remote.id() == "screen" || remote.stream_id() == "chriscord-screen");
                 let is_screen_audio = remote.kind() == RTPCodecType::Audio && remote.id() == "screenaudio";
                 let forward_target = if is_screen_audio {
                     tracing::info!("voice: {username_for_track}'s screen share sound arrived");
                     match screen_audio_source_for(&state, &key, remote.codec().capability).await {
+                        Some(t) => t,
+                        None => return,
+                    }
+                } else if is_screen_low {
+                    tracing::info!("voice: {username_for_track}'s smaller screen share stream arrived");
+                    match screen_low_source_for(&state, &key, remote.ssrc(), remote.codec().capability).await {
                         Some(t) => t,
                         None => return,
                     }
@@ -793,10 +836,11 @@ async fn renegotiate_one(
     // Screens (and their sound) they've asked to watch that have no section
     // on this connection yet.
     let rt = &state.voice_runtime;
-    let missing_screen =
-        missing_screen_parts(rt, key, board_id, &board_members, &rt.screen_sources, &rt.screen_senders).await;
+    let screen_srcs = viewer_screen_sources(rt, key).await;
+    let screen_audio_srcs = board_sources(&rt.screen_audio_sources, board_id).await;
+    let missing_screen = missing_screen_parts(rt, key, &board_members, &screen_srcs, &rt.screen_senders).await;
     let missing_screen_audio =
-        missing_screen_parts(rt, key, board_id, &board_members, &rt.screen_audio_sources, &rt.screen_audio_senders).await;
+        missing_screen_parts(rt, key, &board_members, &screen_audio_srcs, &rt.screen_audio_senders).await;
     if missing.is_empty() && missing_video.is_empty() && missing_screen.is_empty() && missing_screen_audio.is_empty() {
         tracing::info!("voice: renegotiate_one for {username}: nothing missing, no-op");
         return Ok(());
@@ -851,12 +895,10 @@ async fn renegotiate_one(
             newly_video.push(other.clone());
         }
     }
-    let newly_screen = add_screen_sections(
-        pc, key, board_id, &missing_screen, RTPCodecType::Video, &rt.screen_sources, &rt.screen_senders,
-    )
-    .await?;
+    let newly_screen =
+        add_screen_sections(pc, key, &missing_screen, RTPCodecType::Video, &screen_srcs, &rt.screen_senders).await?;
     let newly_screen_audio = add_screen_sections(
-        pc, key, board_id, &missing_screen_audio, RTPCodecType::Audio, &rt.screen_audio_sources, &rt.screen_audio_senders,
+        pc, key, &missing_screen_audio, RTPCodecType::Audio, &screen_audio_srcs, &rt.screen_audio_senders,
     )
     .await?;
     if newly_attached.is_empty() && newly_video.is_empty() && newly_screen.is_empty() && newly_screen_audio.is_empty() {
@@ -1068,22 +1110,126 @@ async fn screen_watchers(state: &Arc<AppState>, board_id: &str, sharer: &str) ->
 }
 
 /// Click to watch: start (or stop) forwarding someone's screen to a viewer.
-pub async fn set_watch(state: &Arc<AppState>, board_id: &str, viewer: &str, sharer: &str, watch: bool) {
+/// `limit` is the most they want to receive (None: as shared) — it applies
+/// to every screen they watch, so it's updated on each of these.
+pub async fn set_watch(
+    state: &Arc<AppState>,
+    board_id: &str,
+    viewer: &str,
+    sharer: &str,
+    watch: bool,
+    limit: Option<ScreenSize>,
+) {
     if viewer == sharer {
         return;
     }
     let key: ParticipantKey = (board_id.to_string(), viewer.to_string());
-    {
-        let mut w = state.voice_runtime.screen_watch.lock().await;
+    let rt = &state.voice_runtime;
+    let limit_changed = {
+        let mut views = rt.screen_view.lock().await;
+        let before = views.get(&key).copied();
+        match limit {
+            Some(l) => views.insert(key.clone(), l),
+            None => views.remove(&key),
+        };
+        before != limit
+    };
+    let watching: Vec<String> = {
+        let mut w = rt.screen_watch.lock().await;
         let set = w.entry(key.clone()).or_default();
         if watch {
             set.insert(sharer.to_string());
         } else {
             set.remove(sharer);
         }
+        set.iter().cloned().collect()
+    };
+    tracing::info!(
+        "voice: {viewer} {} watching {sharer}'s screen (at most: {limit:?})",
+        if watch { "started" } else { "stopped" }
+    );
+    // Who might now need a smaller version made (or no longer needs one):
+    // this sharer, and — if the viewer's limit changed — everyone they watch.
+    let mut sharers = vec![sharer.to_string()];
+    if limit_changed {
+        sharers.extend(watching.into_iter().filter(|s| s != sharer));
     }
-    tracing::info!("voice: {viewer} {} watching {sharer}'s screen", if watch { "started" } else { "stopped" });
+    for s in &sharers {
+        update_low_demand(state, board_id, s).await;
+    }
     apply_screens(state, &key).await;
+}
+
+/// A sharer says what they're sharing at (voice_screen_native).
+pub async fn set_screen_native(state: &Arc<AppState>, board_id: &str, sharer: &str, native: ScreenSize) {
+    let key: ParticipantKey = (board_id.to_string(), sharer.to_string());
+    state.voice_runtime.screen_native.lock().await.insert(key, native);
+    update_low_demand(state, board_id, sharer).await;
+    for viewer in screen_watchers(state, board_id, sharer).await {
+        apply_screens(state, &(board_id.to_string(), viewer)).await;
+    }
+}
+
+/// Whether a viewer with this limit wants less than a share gives.
+fn wants_smaller(limit: Option<ScreenSize>, native: Option<ScreenSize>) -> bool {
+    match (limit, native) {
+        (None, _) => false,
+        (Some(_), None) => true,
+        (Some(l), Some(n)) => l.height < n.height || l.fps < n.fps,
+    }
+}
+
+/// Works out whether this sharer should be sending a smaller version, and
+/// at what size — the largest any viewer wanting one asked for, never more
+/// than the share itself — and tells them if that's changed. When none is
+/// wanted any more, its stream is dropped here too.
+async fn update_low_demand(state: &Arc<AppState>, board_id: &str, sharer: &str) {
+    let rt = &state.voice_runtime;
+    let skey: ParticipantKey = (board_id.to_string(), sharer.to_string());
+    let native = rt.screen_native.lock().await.get(&skey).copied();
+    let viewers = screen_watchers(state, board_id, sharer).await;
+    let mut want: Option<ScreenSize> = None;
+    {
+        let views = rt.screen_view.lock().await;
+        for v in &viewers {
+            let limit = views.get(&(board_id.to_string(), v.clone())).copied();
+            if !wants_smaller(limit, native) {
+                continue;
+            }
+            let l = limit.unwrap();
+            want = Some(match want {
+                None => l,
+                Some(w) => ScreenSize { height: w.height.max(l.height), fps: w.fps.max(l.fps) },
+            });
+        }
+    }
+    if let (Some(w), Some(n)) = (want, native) {
+        let clamped = ScreenSize { height: w.height.min(n.height), fps: w.fps.min(n.fps) };
+        want = if clamped == n { None } else { Some(clamped) };
+    }
+    let before = {
+        let mut asked = rt.screen_low_asked.lock().await;
+        let before = asked.get(&skey).copied();
+        match want {
+            Some(w) => asked.insert(skey.clone(), w),
+            None => asked.remove(&skey),
+        };
+        before
+    };
+    if before == want {
+        return;
+    }
+    tracing::info!("voice: asking {sharer} for a smaller version of their screen: {want:?}");
+    if want.is_none() {
+        rt.screen_low_sources.lock().await.remove(&skey);
+        rt.screen_low_ssrc.lock().await.remove(&skey);
+    }
+    let w = want.unwrap_or(ScreenSize { height: 0, fps: 0 });
+    crate::ws::send_to_user(
+        state,
+        sharer,
+        serde_json::json!({ "type": "voice_screen_low", "board_id": board_id, "height": w.height, "fps": w.fps }),
+    );
 }
 
 /// Someone stopped sharing: everyone watching them stops (their apps also
@@ -1098,9 +1244,49 @@ pub async fn screen_stopped(state: &Arc<AppState>, board_id: &str, sharer: &str)
             }
         }
     }
+    // Their next share starts without a smaller version until asked again.
+    let skey: ParticipantKey = (board_id.to_string(), sharer.to_string());
+    let rt = &state.voice_runtime;
+    rt.screen_low_asked.lock().await.remove(&skey);
+    rt.screen_low_sources.lock().await.remove(&skey);
+    rt.screen_low_ssrc.lock().await.remove(&skey);
+    rt.screen_native.lock().await.remove(&skey);
     for v in viewers {
         apply_screens(state, &(board_id.to_string(), v)).await;
     }
+}
+
+/// The screens a viewer would be sent right now, by sharer: each one's
+/// smaller version if they want less than it's shared at and there is one,
+/// otherwise the full one.
+async fn viewer_screen_sources(rt: &VoiceRuntime, key: &ParticipantKey) -> HashMap<String, Arc<TrackLocalStaticRTP>> {
+    let mut out = board_sources(&rt.screen_sources, &key.0).await;
+    let limit = rt.screen_view.lock().await.get(key).copied();
+    if limit.is_none() {
+        return out;
+    }
+    let lows = board_sources(&rt.screen_low_sources, &key.0).await;
+    let natives = rt.screen_native.lock().await;
+    for (sharer, full) in out.iter_mut() {
+        let native = natives.get(&(key.0.clone(), sharer.clone())).copied();
+        if let (true, Some(low)) = (wants_smaller(limit, native), lows.get(sharer)) {
+            *full = Arc::clone(low);
+        }
+    }
+    out
+}
+
+/// Everyone's source in one of the per-participant maps, on one board.
+async fn board_sources(
+    map: &AsyncMutex<HashMap<ParticipantKey, Arc<TrackLocalStaticRTP>>>,
+    board_id: &str,
+) -> HashMap<String, Arc<TrackLocalStaticRTP>> {
+    map.lock()
+        .await
+        .iter()
+        .filter(|((b, _), _)| b == board_id)
+        .map(|((_, u), t)| (u.clone(), Arc::clone(t)))
+        .collect()
 }
 
 /// Brings one viewer's connection in line with the screens they're
@@ -1112,8 +1298,10 @@ async fn apply_screens(state: &Arc<AppState>, key: &ParticipantKey) {
     let Some(pc) = state.voice_runtime.connections.lock().await.get(key).cloned() else { return };
     let watch = state.voice_runtime.screen_watch.lock().await.get(key).cloned().unwrap_or_default();
     let rt = &state.voice_runtime;
-    let (started, new_video) = sync_screen_slots(key, &watch, &rt.screen_sources, &rt.screen_senders).await;
-    let (_, new_audio) = sync_screen_slots(key, &watch, &rt.screen_audio_sources, &rt.screen_audio_senders).await;
+    let video_srcs = viewer_screen_sources(rt, key).await;
+    let audio_srcs = board_sources(&rt.screen_audio_sources, &key.0).await;
+    let (started, new_video) = sync_screen_slots(key, &watch, &video_srcs, &rt.screen_senders).await;
+    let (_, new_audio) = sync_screen_slots(key, &watch, &audio_srcs, &rt.screen_audio_senders).await;
     if !started.is_empty() {
         let state = Arc::clone(state);
         let board_id = key.0.clone();
@@ -1133,26 +1321,28 @@ async fn apply_screens(state: &Arc<AppState>, key: &ParticipantKey) {
 
 /// One half of apply_screens (the picture, or the sound): switches this
 /// viewer's existing sections on or off to match what they're watching.
-/// Returns the sharers that just started, and whether a watched one has
-/// no section yet (a renegotiation is needed).
+/// A section whose stream is no longer the one they should get (moved to or
+/// from the smaller version, or a new share) is stopped and forgotten — a
+/// section can't switch streams. Returns the sharers that just started, and
+/// whether a watched one has no section now (a renegotiation is needed).
 async fn sync_screen_slots(
     key: &ParticipantKey,
     watch: &HashSet<String>,
-    sources_map: &AsyncMutex<HashMap<ParticipantKey, Arc<TrackLocalStaticRTP>>>,
+    sources: &HashMap<String, Arc<TrackLocalStaticRTP>>,
     senders_map: &AsyncMutex<HashMap<ParticipantKey, HashMap<String, ScreenSlot>>>,
 ) -> (Vec<String>, bool) {
-    let sources: HashMap<String, Arc<TrackLocalStaticRTP>> = {
-        let all = sources_map.lock().await;
-        all.iter()
-            .filter(|((b, _), _)| *b == key.0)
-            .map(|((_, u), t)| (u.clone(), Arc::clone(t)))
-            .collect()
-    };
     let mut started = Vec::new();
+    let mut retired = Vec::new();
     let mut senders = senders_map.lock().await;
     let slots = senders.entry(key.clone()).or_default();
     for (sharer, slot) in slots.iter_mut() {
-        let want = if watch.contains(sharer) { sources.get(sharer).cloned() } else { None };
+        let mut want = if watch.contains(sharer) { sources.get(sharer).cloned() } else { None };
+        if let Some(w) = &want {
+            if !Arc::ptr_eq(w, &slot.source) {
+                retired.push(sharer.clone());
+                want = None; // stop this section; a new one is added
+            }
+        }
         let same = match (&want, &slot.playing) {
             (Some(a), Some(b)) => Arc::ptr_eq(a, b),
             (None, None) => true,
@@ -1174,6 +1364,9 @@ async fn sync_screen_slots(
             Err(e) => tracing::warn!("voice: switching {sharer}'s screen for {}: {e}", key.1),
         }
     }
+    for sharer in &retired {
+        slots.remove(sharer);
+    }
     let needs_new = watch.iter().any(|s| sources.contains_key(s) && !slots.contains_key(s));
     (started, needs_new)
 }
@@ -1182,42 +1375,32 @@ async fn sync_screen_slots(
 async fn missing_screen_parts(
     rt: &VoiceRuntime,
     key: &ParticipantKey,
-    board_id: &str,
     board_members: &[String],
-    sources_map: &AsyncMutex<HashMap<ParticipantKey, Arc<TrackLocalStaticRTP>>>,
+    sources: &HashMap<String, Arc<TrackLocalStaticRTP>>,
     senders_map: &AsyncMutex<HashMap<ParticipantKey, HashMap<String, ScreenSlot>>>,
 ) -> Vec<String> {
-    // One lock at a time: add_screen_sections takes sources then senders,
-    // so holding senders while waiting for sources here could deadlock.
     let watch = rt.screen_watch.lock().await.get(key).cloned().unwrap_or_default();
-    let live: Vec<String> = {
-        let sources = sources_map.lock().await;
-        watch
-            .into_iter()
-            .filter(|u| board_members.contains(u) && sources.contains_key(&(board_id.to_string(), u.clone())))
-            .collect()
-    };
+    let live: Vec<String> =
+        watch.into_iter().filter(|u| board_members.contains(u) && sources.contains_key(u)).collect();
     let senders = senders_map.lock().await;
     let have = senders.get(key);
     live.into_iter().filter(|u| !have.map_or(false, |h| h.contains_key(u))).collect()
 }
 
 /// Adds a send-only section (video for a screen, audio for its sound) for
-/// each of `missing` to this connection, playing their current source.
+/// each of `missing` to this connection, playing the stream given for them.
 async fn add_screen_sections(
     pc: &Arc<RTCPeerConnection>,
     key: &ParticipantKey,
-    board_id: &str,
     missing: &[String],
     kind: RTPCodecType,
-    sources_map: &AsyncMutex<HashMap<ParticipantKey, Arc<TrackLocalStaticRTP>>>,
+    sources: &HashMap<String, Arc<TrackLocalStaticRTP>>,
     senders_map: &AsyncMutex<HashMap<ParticipantKey, HashMap<String, ScreenSlot>>>,
 ) -> Result<Vec<String>, String> {
     let mut added = Vec::new();
-    let sources = sources_map.lock().await;
     let mut senders = senders_map.lock().await;
     for other in missing {
-        let Some(track) = sources.get(&(board_id.to_string(), other.clone())) else { continue };
+        let Some(track) = sources.get(other) else { continue };
         let transceiver = pc
             .add_transceiver_from_kind(
                 kind,
@@ -1232,13 +1415,64 @@ async fn add_screen_sections(
             .await
             .map_err(|e| format!("set screen {kind} track for {other}: {e}"))?;
         transceiver.set_direction(RTCRtpTransceiverDirection::Sendonly).await;
-        senders
-            .entry(key.clone())
-            .or_default()
-            .insert(other.clone(), ScreenSlot { transceiver, playing: Some(Arc::clone(track)) });
+        senders.entry(key.clone()).or_default().insert(
+            other.clone(),
+            ScreenSlot { transceiver, source: Arc::clone(track), playing: Some(Arc::clone(track)) },
+        );
         added.push(other.clone());
     }
     Ok(added)
+}
+
+/// The smaller version of a sharer's screen (their "screenlow" section),
+/// made when its packets first arrive; viewers who want it are moved over.
+async fn screen_low_source_for(
+    state: &Arc<AppState>,
+    key: &ParticipantKey,
+    ssrc: u32,
+    codec: RTCRtpCodecCapability,
+) -> Option<Arc<TrackLocalStaticRTP>> {
+    let in_call = { state.voice.lock().unwrap().get(&key.1) == Some(&key.0) };
+    if !in_call {
+        return None;
+    }
+    state.voice_runtime.screen_low_ssrc.lock().await.insert(key.clone(), ssrc);
+    let (source, fresh) = {
+        let mut all = state.voice_runtime.screen_low_sources.lock().await;
+        match all.get(key) {
+            Some(existing) if existing.codec().mime_type.eq_ignore_ascii_case(&codec.mime_type) => {
+                (Arc::clone(existing), false)
+            }
+            _ => {
+                let username = &key.1;
+                // Named like the full one: to a viewer it's simply this
+                // person's screen.
+                let fresh = Arc::new(TrackLocalStaticRTP::new(
+                    RTCRtpCodecCapability {
+                        mime_type: codec.mime_type.clone(),
+                        clock_rate: codec.clock_rate,
+                        channels: codec.channels,
+                        sdp_fmtp_line: codec.sdp_fmtp_line.clone(),
+                        rtcp_feedback: vec![],
+                    },
+                    format!("screen-{username}"),
+                    format!("chriscord-{username}"),
+                ));
+                all.insert(key.clone(), Arc::clone(&fresh));
+                (fresh, true)
+            }
+        }
+    };
+    if fresh {
+        let state = Arc::clone(state);
+        let (board_id, sharer) = key.clone();
+        tokio::spawn(async move {
+            for viewer in screen_watchers(&state, &board_id, &sharer).await {
+                apply_screens(&state, &(board_id.clone(), viewer)).await;
+            }
+        });
+    }
+    Some(source)
 }
 
 /// The shared outgoing source for a screen share's sound — like
@@ -1315,16 +1549,26 @@ async fn keyframe_request(state: &Arc<AppState>, board_id: &str, username: &str,
         }
         last.insert(key.clone(), now);
     }
-    let ssrc = if screen {
-        state.voice_runtime.screen_ssrc.lock().await.get(&key).copied()
+    // A screen's smaller version (if it's sending one) is asked too: a
+    // viewer may be on either.
+    let ssrcs: Vec<u32> = if screen {
+        let rt = &state.voice_runtime;
+        [rt.screen_ssrc.lock().await.get(&key).copied(), rt.screen_low_ssrc.lock().await.get(&key).copied()]
+            .into_iter()
+            .flatten()
+            .collect()
     } else {
-        state.voice_runtime.video_ssrc.lock().await.get(&key).copied()
+        state.voice_runtime.video_ssrc.lock().await.get(&key).copied().into_iter().collect()
     };
-    let Some(ssrc) = ssrc else { return };
+    if ssrcs.is_empty() {
+        return;
+    }
     let Some(pc) = state.voice_runtime.connections.lock().await.get(&key).cloned() else { return };
-    let pli: Box<dyn webrtc::rtcp::packet::Packet + Send + Sync> =
-        Box::new(PictureLossIndication { sender_ssrc: 0, media_ssrc: ssrc });
-    if let Err(e) = pc.write_rtcp(&[pli]).await {
+    let plis: Vec<Box<dyn webrtc::rtcp::packet::Packet + Send + Sync>> = ssrcs
+        .into_iter()
+        .map(|media_ssrc| Box::new(PictureLossIndication { sender_ssrc: 0, media_ssrc }) as _)
+        .collect();
+    if let Err(e) = pc.write_rtcp(&plis).await {
         tracing::debug!("voice: keyframe request to {username} failed: {e}");
     }
 }
@@ -1396,12 +1640,22 @@ pub async fn close_participant(state: &Arc<AppState>, board_id: &str, username: 
     state.voice_runtime.screen_senders.lock().await.remove(&key);
     state.voice_runtime.screen_audio_sources.lock().await.remove(&key);
     state.voice_runtime.screen_audio_senders.lock().await.remove(&key);
-    {
+    state.voice_runtime.screen_low_sources.lock().await.remove(&key);
+    state.voice_runtime.screen_low_ssrc.lock().await.remove(&key);
+    state.voice_runtime.screen_low_asked.lock().await.remove(&key);
+    state.voice_runtime.screen_native.lock().await.remove(&key);
+    state.voice_runtime.screen_view.lock().await.remove(&key);
+    let was_watching: Vec<String> = {
         let mut watch = state.voice_runtime.screen_watch.lock().await;
-        watch.remove(&key);
+        let mine = watch.remove(&key).map(|s| s.into_iter().collect()).unwrap_or_default();
         for set in watch.values_mut() {
             set.remove(username);
         }
+        mine
+    };
+    // Whoever they were watching may no longer need a smaller version.
+    for sharer in was_watching {
+        update_low_demand(state, board_id, &sharer).await;
     }
     {
         let mut attached = state.voice_runtime.video_attached.lock().await;
