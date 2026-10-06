@@ -550,6 +550,13 @@ pub async fn handle_offer(
     // off as they're found.
     let state_for_ice = Arc::clone(state);
     let username_for_ice = username.to_string();
+    // Each connection's state, so a call that never connects (or drops)
+    // shows up in the log with who and when.
+    let username_for_state = username.to_string();
+    pc.on_peer_connection_state_change(Box::new(move |st| {
+        tracing::info!("voice: {username_for_state}'s connection is {st}");
+        Box::pin(async {})
+    }));
     pc.on_ice_candidate(Box::new(move |candidate: Option<RTCIceCandidate>| {
         let state_for_ice = Arc::clone(&state_for_ice);
         let username_for_ice = username_for_ice.clone();
