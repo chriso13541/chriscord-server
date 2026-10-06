@@ -460,23 +460,34 @@ pub async fn handle_offer(
                 // Their camera (it only arrives once it's turned on), or their mic.
                 let forward_target = if remote.kind() == RTPCodecType::Video {
                     tracing::info!("voice: {username_for_track}'s camera stream arrived");
-                    video_source_for(&state, &key, remote.ssrc(), remote.codec().capability).await
+                    match video_source_for(&state, &key, remote.ssrc(), remote.codec().capability).await {
+                        Some(t) => t,
+                        None => return, // they've already left this call
+                    }
                 } else {
+                    tracing::info!("voice: {username_for_track}'s microphone stream arrived");
                     audio_target
                 };
-                loop {
-                    match remote.read_rtp().await {
-                        Ok((packet, _attrs)) => {
-                            if forward_target.write_rtp(&packet).await.is_err() {
-                                break; // no one listening anymore — connection likely closing
+                // The forwarding loop runs on its own task, NOT inside this
+                // callback: webrtc-rs holds a lock for as long as an on_track
+                // callback runs, so a loop in here (as before) meant the first
+                // track — usually the mic — blocked every later one, and a
+                // camera's track never arrived at all.
+                tokio::spawn(async move {
+                    loop {
+                        match remote.read_rtp().await {
+                            Ok((packet, _attrs)) => {
+                                if forward_target.write_rtp(&packet).await.is_err() {
+                                    break; // no one listening anymore — connection likely closing
+                                }
+                            }
+                            Err(_) => {
+                                tracing::debug!("voice: remote track ended for {username_for_track}");
+                                break;
                             }
                         }
-                        Err(_) => {
-                            tracing::debug!("voice: remote track ended for {username_for_track}");
-                            break;
-                        }
                     }
-                }
+                });
             })
         },
     ));
@@ -642,7 +653,7 @@ async fn renegotiate_others_for_new_source(state: &Arc<AppState>, board_id: &str
             .collect()
     };
     tracing::info!(
-        "voice: {new_username} joined board {board_id}, renegotiating {} existing connection(s): {:?}",
+        "voice: new audio/video from {new_username} on board {board_id}, renegotiating {} existing connection(s): {:?}",
         others.len(),
         others.iter().map(|(k, _)| &k.1).collect::<Vec<_>>()
     );
@@ -827,7 +838,14 @@ async fn video_source_for(
     key: &ParticipantKey,
     ssrc: u32,
     codec: RTCRtpCodecCapability,
-) -> Arc<TrackLocalStaticRTP> {
+) -> Option<Arc<TrackLocalStaticRTP>> {
+    // A stream from a connection that's already been closed (they left
+    // or rejoined) mustn't bring back a camera nobody can see.
+    let in_call = { state.voice.lock().unwrap().get(&key.1) == Some(&key.0) };
+    if !in_call {
+        tracing::info!("voice: ignoring a camera stream from {} — no longer in that call", key.1);
+        return None;
+    }
     state.voice_runtime.video_ssrc.lock().await.insert(key.clone(), ssrc);
     let (source, fresh) = {
         let mut videos = state.voice_runtime.video_sources.lock().await;
@@ -868,7 +886,7 @@ async fn video_source_for(
             renegotiate_others_for_new_source(&state, &board_id, &username).await;
         });
     }
-    source
+    Some(source)
 }
 
 /// Asks a participant's camera for a fresh keyframe (RTCP PLI) — what a
