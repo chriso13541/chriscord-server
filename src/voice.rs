@@ -584,10 +584,12 @@ pub async fn handle_offer(
 
     // Anyone on this board already sharing a camera: add their video to
     // this connection with a renegotiation once this answer has landed.
-    let others_have_video = {
+    let others_with_video: Vec<String> = {
         let videos = state.voice_runtime.video_sources.lock().await;
-        videos.keys().any(|(b, u)| b == board_id && u != username)
+        videos.keys().filter(|(b, u)| b == board_id && u != username).map(|(_, u)| u.clone()).collect()
     };
+    tracing::info!("voice: {username}'s connection is up; cameras already on in this call: {others_with_video:?}");
+    let others_have_video = !others_with_video.is_empty();
     if others_have_video {
         let state_for_video = Arc::clone(state);
         let board_for_video = board_id.to_string();
