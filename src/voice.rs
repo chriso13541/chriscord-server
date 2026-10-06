@@ -1016,7 +1016,9 @@ async fn screen_source_for(
         }
     };
     if fresh {
-        // Anyone already watching (e.g. they reconnected mid-share) gets it.
+        // Anyone already watching (e.g. they reconnected mid-share) gets it,
+        // in new sections (see forget_screen_slots).
+        forget_screen_slots(state, key, true, false).await;
         let state = Arc::clone(state);
         let (board_id, sharer) = key.clone();
         tokio::spawn(async move {
@@ -1026,6 +1028,33 @@ async fn screen_source_for(
         });
     }
     Some(source)
+}
+
+/// A sharer's screen (and its sound) is going away or being replaced by a
+/// new stream: stop it on every viewer's connection and forget those
+/// sections, so the next time someone watches, a fresh section is added by
+/// renegotiation. (Switching an existing section over to a *different*
+/// source with replace_track sends nothing with this version of webrtc-rs —
+/// only pausing and resuming the same source works — so a new stream
+/// always gets new sections, like cameras do.)
+async fn forget_screen_slots(state: &Arc<AppState>, sharer: &ParticipantKey, video: bool, audio: bool) {
+    let rt = &state.voice_runtime;
+    let maps = [(video, &rt.screen_senders), (audio, &rt.screen_audio_senders)];
+    for (_, senders_map) in maps.into_iter().filter(|(on, _)| *on) {
+        let gone: Vec<ScreenSlot> = {
+            let mut all = senders_map.lock().await;
+            all.iter_mut()
+                .filter(|((b, _), _)| *b == sharer.0)
+                .filter_map(|(_, slots)| slots.remove(&sharer.1))
+                .collect()
+        };
+        for slot in gone {
+            if slot.playing.is_some() {
+                let sender = slot.transceiver.sender().await;
+                let _ = sender.replace_track(None).await;
+            }
+        }
+    }
 }
 
 /// Who on this board is watching this person's screen.
@@ -1248,6 +1277,7 @@ async fn screen_audio_source_for(
         }
     };
     if fresh {
+        forget_screen_slots(state, key, false, true).await;
         let state = Arc::clone(state);
         let (board_id, sharer) = key.clone();
         tokio::spawn(async move {
@@ -1359,6 +1389,7 @@ pub async fn close_participant(state: &Arc<AppState>, board_id: &str, username: 
     state.voice_runtime.video_ssrc.lock().await.remove(&key);
     state.voice_runtime.reneg_locks.lock().await.remove(&key);
     state.voice_runtime.keyframe_last.lock().await.remove(&key);
+    forget_screen_slots(state, &key, true, true).await;
     state.voice_runtime.screen_sources.lock().await.remove(&key);
     state.voice_runtime.screen_ssrc.lock().await.remove(&key);
     state.voice_runtime.screen_keyframe_last.lock().await.remove(&key);
