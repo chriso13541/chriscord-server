@@ -47,8 +47,14 @@ struct ClientMsg {
     deafened:        Option<bool>,
     /// voice_video: whether their camera is now on
     video:           Option<bool>,
-    /// voice_keyframe: whose camera to ask for a keyframe
+    /// voice_keyframe / voice_watch: whose camera or screen
     target:          Option<String>,
+    /// voice_screen: whether their screen share is now on
+    screen:          Option<bool>,
+    /// voice_watch: start (true) or stop watching target's screen
+    watch:           Option<bool>,
+    /// voice_keyframe: "screen" for a screen share, else their camera
+    kind:            Option<String>,
     pfp_updated_at:  Option<i64>,
     pfp_data:        Option<String>,
     profile_updated_at: Option<i64>,
@@ -190,6 +196,7 @@ async fn handle_socket(socket: WebSocket, token: String, initial_status: Option<
                                         { state.voice_reconnecting.lock().unwrap().remove(&username); } // back properly
                                         // Cameras start off; the app says when it turns one on.
                                         { video_on().lock().unwrap().remove(&username); }
+                                        { screen_on().lock().unwrap().remove(&username); }
                                         // Mute/deafen start as whatever the app says it is right
                                         // now — never carried over from an earlier session, which
                                         // is how someone could show as muted while talking.
@@ -304,12 +311,42 @@ async fn handle_socket(socket: WebSocket, token: String, initial_status: Option<
                                     }
                                 }
                             }
+                            "voice_screen" if !may_control_voice(&username, conn_id) => {}
+                            "voice_screen" => {
+                                if let Some(bid) = cm.board_id {
+                                    let in_channel = { state.voice.lock().unwrap().get(&username) == Some(&bid) };
+                                    if in_channel {
+                                        let on = cm.screen.unwrap_or(false);
+                                        {
+                                            let mut set = screen_on().lock().unwrap();
+                                            if on { set.insert(username.clone()); } else { set.remove(&username); }
+                                        }
+                                        broadcast_voice_state(&state);
+                                        if !on {
+                                            voice::screen_stopped(&state, &bid, &username).await;
+                                        }
+                                    }
+                                }
+                            }
+                            "voice_watch" if !may_control_voice(&username, conn_id) => {}
+                            "voice_watch" => {
+                                if let (Some(bid), Some(target)) = (cm.board_id, cm.target) {
+                                    let in_channel = { state.voice.lock().unwrap().get(&username) == Some(&bid) };
+                                    if in_channel {
+                                        voice::set_watch(&state, &bid, &username, &target, cm.watch.unwrap_or(false)).await;
+                                    }
+                                }
+                            }
                             "voice_keyframe" if !may_control_voice(&username, conn_id) => {}
                             "voice_keyframe" => {
                                 if let (Some(bid), Some(target)) = (cm.board_id, cm.target) {
                                     let in_channel = { state.voice.lock().unwrap().get(&username) == Some(&bid) };
                                     if in_channel {
-                                        voice::request_keyframe(&state, &bid, &target).await;
+                                        if cm.kind.as_deref() == Some("screen") {
+                                            voice::request_screen_keyframe(&state, &bid, &target).await;
+                                        } else {
+                                            voice::request_keyframe(&state, &bid, &target).await;
+                                        }
                                     }
                                 }
                             }
@@ -584,6 +621,12 @@ fn voice_owners() -> &'static std::sync::Mutex<std::collections::HashMap<String,
 }
 /// Who has their camera on (only meaningful while they're in a call —
 /// broadcast_voice_state lists just those still in one).
+/// Who's sharing their screen right now (like video_on).
+fn screen_on() -> &'static std::sync::Mutex<std::collections::HashSet<String>> {
+    static ON: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<String>>> = std::sync::OnceLock::new();
+    ON.get_or_init(|| std::sync::Mutex::new(std::collections::HashSet::new()))
+}
+
 fn video_on() -> &'static std::sync::Mutex<std::collections::HashSet<String>> {
     static ON: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<String>>> = std::sync::OnceLock::new();
     ON.get_or_init(|| std::sync::Mutex::new(std::collections::HashSet::new()))
@@ -620,9 +663,14 @@ fn broadcast_voice_state(state: &Arc<AppState>) {
         let on = video_on().lock().unwrap();
         on.iter().filter(|u| voice.contains_key(*u)).cloned().collect()
     };
+    let screens: Vec<String> = {
+        let voice = state.voice.lock().unwrap();
+        let on = screen_on().lock().unwrap();
+        on.iter().filter(|u| voice.contains_key(*u)).cloned().collect()
+    };
     let _ = state.tx.send(serde_json::json!({
         "type": "voice_state", "channels": channels, "reconnecting": reconnecting, "mute_states": mute_states,
-        "video_on": video,
+        "video_on": video, "screen_on": screens,
     }).to_string());
 }
 
