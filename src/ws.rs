@@ -65,6 +65,8 @@ struct ClientMsg {
     bio:             Option<String>,
     /// Base64 banner image; absent or empty means "no banner".
     banner_data:     Option<String>,
+    /// profile_upload: their card colour ("#rrggbb", "" for the default)
+    tint:            Option<String>,
     /// set_status: "online" | "idle" | "invisible"
     status:          Option<String>,
     /// typing: whether they're typing right now
@@ -460,7 +462,8 @@ async fn handle_socket(socket: WebSocket, token: String, initial_status: Option<
                                         _ => None,
                                     };
                                     let bio = cm.bio.unwrap_or_default();
-                                    match crate::profile::save_cached(&user_key, &bio, banner.as_deref(), updated_at) {
+                                    let tint = cm.tint.unwrap_or_default();
+                                    match crate::profile::save_cached(&user_key, &bio, &tint, banner.as_deref(), updated_at) {
                                         Ok(()) => {
                                             let _ = state.tx.send(serde_json::json!({
                                                 "type": "profile_updated", "username": username, "updated_at": updated_at,

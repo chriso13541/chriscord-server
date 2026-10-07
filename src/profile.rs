@@ -10,7 +10,9 @@
 // profile_updated so anyone showing that user's card knows to refetch.
 //
 // On disk, per account (named by its public key — see pfp::storage_key_for):
-//   pfps/<key>.profile.json  — { bio, updated_at, has_banner }
+//   pfps/<key>.profile.json  — { bio, tint, updated_at, has_banner }
+// tint is the card colour they chose ("#rrggbb", or "" for the default),
+// also used behind their picture in a call when their camera is off.
 //   pfps/<key>.banner        — the banner image, if they set one
 //
 // The default banner (a colour picked from the user's pfp) is computed by
@@ -35,6 +37,8 @@ pub const MAX_BIO_CHARS: usize = 500;
 #[derive(Serialize, Deserialize, Default)]
 struct StoredProfile {
     bio:        String,
+    #[serde(default)]
+    tint:       String,
     updated_at: i64,
     has_banner: bool,
 }
@@ -56,9 +60,13 @@ pub fn cached_timestamp(username: &str) -> Option<i64> {
 
 /// Replaces a user's cached profile. `banner` None means "no banner" —
 /// any previously cached one is removed.
-pub fn save_cached(username: &str, bio: &str, banner: Option<&[u8]>, updated_at: i64) -> std::io::Result<()> {
+pub fn save_cached(username: &str, bio: &str, tint: &str, banner: Option<&[u8]>, updated_at: i64) -> std::io::Result<()> {
     let bad = |m: &str| std::io::Error::new(std::io::ErrorKind::InvalidData, m.to_string());
     let Some(username) = sanitize_username(username) else { return Err(bad("invalid username")) };
+    let tint = tint.trim().to_ascii_lowercase();
+    if !tint.is_empty() && !is_hex_colour(&tint) {
+        return Err(bad("tint must be a #rrggbb colour"));
+    }
     let bio = bio.trim();
     if bio.chars().count() > MAX_BIO_CHARS {
         return Err(bad("bio too long"));
@@ -77,9 +85,14 @@ pub fn save_cached(username: &str, bio: &str, banner: Option<&[u8]>, updated_at:
         Some(bytes) => std::fs::write(&banner_path, bytes)?,
         None => { let _ = std::fs::remove_file(&banner_path); }
     }
-    let stored = StoredProfile { bio: bio.to_string(), updated_at, has_banner: banner.is_some() };
+    let stored = StoredProfile { bio: bio.to_string(), tint, updated_at, has_banner: banner.is_some() };
     std::fs::write(dir.join(format!("{username}.profile.json")), serde_json::to_string(&stored)?)?;
     Ok(())
+}
+
+/// "#rrggbb", nothing else.
+fn is_hex_colour(s: &str) -> bool {
+    s.len() == 7 && s.starts_with('#') && s[1..].chars().all(|c| c.is_ascii_hexdigit())
 }
 
 /// GET /api/profile/:username — bio, whether there's a banner, and when
@@ -104,6 +117,7 @@ pub async fn get_profile(
     Json(serde_json::json!({
         "username": username,
         "bio": p.bio,
+        "tint": p.tint,
         "has_banner": p.has_banner,
         "updated_at": p.updated_at,
         "member_since": member_since,
