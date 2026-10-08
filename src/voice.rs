@@ -1109,6 +1109,18 @@ async fn screen_watchers(state: &Arc<AppState>, board_id: &str, sharer: &str) ->
         .collect()
 }
 
+/// Tells a sharer who's watching their screen (voice_screen_viewers) — sent
+/// whenever that changes, so their app can show the count and the names.
+pub async fn notify_screen_viewers(state: &Arc<AppState>, board_id: &str, sharer: &str) {
+    let mut viewers = screen_watchers(state, board_id, sharer).await;
+    viewers.sort();
+    crate::ws::send_to_user(
+        state,
+        sharer,
+        serde_json::json!({ "type": "voice_screen_viewers", "board_id": board_id, "viewers": viewers }),
+    );
+}
+
 /// Click to watch: start (or stop) forwarding someone's screen to a viewer.
 /// `limit` is the most they want to receive (None: as shared) — it applies
 /// to every screen they watch, so it's updated on each of these.
@@ -1158,6 +1170,7 @@ pub async fn set_watch(
         update_low_demand(state, board_id, s).await;
     }
     apply_screens(state, &key).await;
+    notify_screen_viewers(state, board_id, sharer).await;
 }
 
 /// A sharer says what they're sharing at (voice_screen_native).
@@ -1254,6 +1267,7 @@ pub async fn screen_stopped(state: &Arc<AppState>, board_id: &str, sharer: &str)
     for v in viewers {
         apply_screens(state, &(board_id.to_string(), v)).await;
     }
+    notify_screen_viewers(state, board_id, sharer).await; // nobody now
 }
 
 /// The screens a viewer would be sent right now, by sharer: each one's
@@ -1653,9 +1667,11 @@ pub async fn close_participant(state: &Arc<AppState>, board_id: &str, username: 
         }
         mine
     };
-    // Whoever they were watching may no longer need a smaller version.
+    // Whoever they were watching may no longer need a smaller version, and
+    // has one viewer fewer.
     for sharer in was_watching {
         update_low_demand(state, board_id, &sharer).await;
+        notify_screen_viewers(state, board_id, &sharer).await;
     }
     {
         let mut attached = state.voice_runtime.video_attached.lock().await;

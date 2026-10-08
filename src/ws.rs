@@ -333,6 +333,9 @@ async fn handle_socket(socket: WebSocket, token: String, initial_status: Option<
                                         broadcast_voice_state(&state);
                                         if !on {
                                             voice::screen_stopped(&state, &bid, &username).await;
+                                        } else {
+                                            // A share (re)starting: who's watching it so far.
+                                            voice::notify_screen_viewers(&state, &bid, &username).await;
                                         }
                                     }
                                 }
@@ -569,7 +572,7 @@ async fn handle_socket(socket: WebSocket, token: String, initial_status: Option<
                                 Some("message_edit") | Some("message_delete") | Some("message_pin") | Some("message_reaction") => subscribed_board.as_deref()
                                     .map(|bid| v["board_id"].as_str() == Some(bid))
                                     .unwrap_or(false),
-                                Some("voice_answer") | Some("voice_ice") | Some("voice_status_snapshot") | Some("voice_renegotiate") | Some("voice_screen_low") =>
+                                Some("voice_answer") | Some("voice_ice") | Some("voice_status_snapshot") | Some("voice_renegotiate") | Some("voice_screen_low") | Some("voice_screen_viewers") =>
                                     v["target"].as_str() == Some(username.as_str()) && may_control_voice(&username, conn_id),
                                 Some("pfp_request") | Some("profile_request") =>
                                     v["target"].as_str() == Some(username.as_str()),
