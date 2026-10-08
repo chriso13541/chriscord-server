@@ -10,7 +10,10 @@
 // profile_updated so anyone showing that user's card knows to refetch.
 //
 // On disk, per account (named by its public key — see pfp::storage_key_for):
-//   pfps/<key>.profile.json  — { bio, tint, updated_at, has_banner }
+//   pfps/<key>.profile.json  — { bio, tint, nickname, updated_at, has_banner }
+// nickname is their global nickname: the name they want shown on every
+// server, unless they've set a server nickname here (users.nickname, which
+// this server owns — see set_nickname in ws.rs).
 // tint is the card colour they chose ("#rrggbb", or "" for the default),
 // also used behind their picture in a call when their camera is off.
 //   pfps/<key>.banner        — the banner image, if they set one
@@ -34,11 +37,39 @@ use crate::state::AppState;
 /// counter.
 pub const MAX_BIO_CHARS: usize = 500;
 
+/// Longest nickname (global or server), in characters — matches the client.
+pub const MAX_NICKNAME_CHARS: usize = 32;
+
+/// A nickname as stored: trimmed, inner runs of whitespace collapsed to one
+/// space. "" means none. Refused if it's too long or has control or
+/// invisible formatting characters (zero-width spaces, direction overrides)
+/// that would let it look blank or like someone else's name.
+pub fn clean_nickname(raw: &str) -> Result<String, &'static str> {
+    let nick = raw.split_whitespace().collect::<Vec<_>>().join(" ");
+    if nick.chars().count() > MAX_NICKNAME_CHARS {
+        return Err("Nicknames can be at most 32 characters");
+    }
+    if nick.chars().any(|c| c.is_control() || matches!(c,
+        '\u{200B}'..='\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2060}'..='\u{206F}' | '\u{FEFF}' | '\u{00AD}' | '\u{3164}' | '\u{115F}' | '\u{1160}'))
+    {
+        return Err("That nickname has characters that can't be used");
+    }
+    Ok(nick)
+}
+
+/// The global nickname this server has cached for an account (by storage
+/// key), "" if none.
+pub fn global_nickname(key: &str) -> String {
+    read_stored(key).map(|p| p.nickname).unwrap_or_default()
+}
+
 #[derive(Serialize, Deserialize, Default)]
 struct StoredProfile {
     bio:        String,
     #[serde(default)]
     tint:       String,
+    #[serde(default)]
+    nickname:   String,
     updated_at: i64,
     has_banner: bool,
 }
@@ -60,7 +91,7 @@ pub fn cached_timestamp(username: &str) -> Option<i64> {
 
 /// Replaces a user's cached profile. `banner` None means "no banner" —
 /// any previously cached one is removed.
-pub fn save_cached(username: &str, bio: &str, tint: &str, banner: Option<&[u8]>, updated_at: i64) -> std::io::Result<()> {
+pub fn save_cached(username: &str, bio: &str, tint: &str, nickname: &str, banner: Option<&[u8]>, updated_at: i64) -> std::io::Result<()> {
     let bad = |m: &str| std::io::Error::new(std::io::ErrorKind::InvalidData, m.to_string());
     let Some(username) = sanitize_username(username) else { return Err(bad("invalid username")) };
     let tint = tint.trim().to_ascii_lowercase();
@@ -71,6 +102,7 @@ pub fn save_cached(username: &str, bio: &str, tint: &str, banner: Option<&[u8]>,
     if bio.chars().count() > MAX_BIO_CHARS {
         return Err(bad("bio too long"));
     }
+    let nickname = clean_nickname(nickname).map_err(bad)?;
     if let Some(bytes) = banner {
         if !crate::pfp::is_profile_image(bytes) {
             return Err(bad("banner is not a supported image (PNG, JPEG, GIF, WebP, BMP or AVIF)"));
@@ -85,7 +117,7 @@ pub fn save_cached(username: &str, bio: &str, tint: &str, banner: Option<&[u8]>,
         Some(bytes) => std::fs::write(&banner_path, bytes)?,
         None => { let _ = std::fs::remove_file(&banner_path); }
     }
-    let stored = StoredProfile { bio: bio.to_string(), tint, updated_at, has_banner: banner.is_some() };
+    let stored = StoredProfile { bio: bio.to_string(), tint, nickname, updated_at, has_banner: banner.is_some() };
     std::fs::write(dir.join(format!("{username}.profile.json")), serde_json::to_string(&stored)?)?;
     Ok(())
 }
@@ -106,10 +138,10 @@ pub async fn get_profile(
     if crate::db::verify_token(&s.pool, token_from(&headers)).await.ok().flatten().is_none() {
         return StatusCode::UNAUTHORIZED.into_response();
     }
-    let row = sqlx::query("SELECT created_at, public_key FROM users WHERE username = ?")
+    let row = sqlx::query("SELECT created_at, public_key, nickname FROM users WHERE username = ?")
         .bind(&username).fetch_optional(&s.pool).await;
-    let (member_since, key): (String, String) = match row {
-        Ok(Some(r)) => (r.get("created_at"), r.get::<String, _>("public_key").to_lowercase()),
+    let (member_since, key, server_nick): (String, String, String) = match row {
+        Ok(Some(r)) => (r.get("created_at"), r.get::<String, _>("public_key").to_lowercase(), r.get("nickname")),
         Ok(None) => return StatusCode::NOT_FOUND.into_response(),
         Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     };
@@ -118,6 +150,8 @@ pub async fn get_profile(
         "username": username,
         "bio": p.bio,
         "tint": p.tint,
+        "nickname": server_nick,          // on this server only ("" = none)
+        "global_nickname": p.nickname,    // from their profile ("" = none)
         "has_banner": p.has_banner,
         "updated_at": p.updated_at,
         "member_since": member_since,

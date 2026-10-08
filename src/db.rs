@@ -180,6 +180,9 @@ pub async fn init() -> Result<SqlitePool, sqlx::Error> {
         "ALTER TABLE messages ADD COLUMN reply_to    TEXT",
         // System messages: "join" = "<name> joined the server." ('' = a normal message)
         "ALTER TABLE messages ADD COLUMN kind        TEXT",
+        // Server nickname: what this member is called on this server only
+        // ('' = none — their global nickname, or else their username, shows).
+        "ALTER TABLE users    ADD COLUMN nickname    TEXT NOT NULL DEFAULT ''",
     ];
     for sql in migrations {
         let _ = sqlx::query(sql).execute(&pool).await;

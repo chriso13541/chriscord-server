@@ -67,6 +67,9 @@ struct ClientMsg {
     banner_data:     Option<String>,
     /// profile_upload: their card colour ("#rrggbb", "" for the default)
     tint:            Option<String>,
+    /// profile_upload: their global nickname; set_nickname: their nickname
+    /// on this server. "" (or absent) means none.
+    nickname:        Option<String>,
     /// set_status: "online" | "idle" | "invisible"
     status:          Option<String>,
     /// typing: whether they're typing right now
@@ -443,6 +446,31 @@ async fn handle_socket(socket: WebSocket, token: String, initial_status: Option<
                                     }).to_string());
                                 }
                             }
+                            // Their nickname on this server only ("" clears it, so their
+                            // global nickname or username shows again).
+                            "set_nickname" => {
+                                match crate::profile::clean_nickname(cm.nickname.as_deref().unwrap_or("")) {
+                                    Ok(nick) => {
+                                        let saved = sqlx::query("UPDATE users SET nickname = ? WHERE username = ?")
+                                            .bind(&nick).bind(&username).execute(&state.pool).await;
+                                        match saved {
+                                            Ok(_) => {
+                                                tracing::info!("nickname: {username} is now {:?} on this server", nick);
+                                                broadcast_users(&state);
+                                            }
+                                            Err(e) => {
+                                                tracing::warn!("nickname: couldn't save {username}'s nickname: {e}");
+                                                send_to_user(&state, &username, serde_json::json!({
+                                                    "type": "action_denied", "message": "Couldn't save your nickname — try again",
+                                                }));
+                                            }
+                                        }
+                                    }
+                                    Err(why) => send_to_user(&state, &username, serde_json::json!({
+                                        "type": "action_denied", "message": why,
+                                    })),
+                                }
+                            }
                             // Profile (bio + banner) sync — same handshake as the pfp above.
                             "profile_info" => {
                                 if let Some(updated_at) = cm.profile_updated_at {
@@ -463,11 +491,18 @@ async fn handle_socket(socket: WebSocket, token: String, initial_status: Option<
                                     };
                                     let bio = cm.bio.unwrap_or_default();
                                     let tint = cm.tint.unwrap_or_default();
-                                    match crate::profile::save_cached(&user_key, &bio, &tint, banner.as_deref(), updated_at) {
+                                    let nickname = cm.nickname.unwrap_or_default();
+                                    let old_nick = crate::profile::global_nickname(&user_key);
+                                    match crate::profile::save_cached(&user_key, &bio, &tint, &nickname, banner.as_deref(), updated_at) {
                                         Ok(()) => {
                                             let _ = state.tx.send(serde_json::json!({
                                                 "type": "profile_updated", "username": username, "updated_at": updated_at,
                                             }).to_string());
+                                            // Their global nickname goes out with the member
+                                            // list, which is what every client names people by.
+                                            if crate::profile::global_nickname(&user_key) != old_nick {
+                                                broadcast_users(&state);
+                                            }
                                         }
                                         Err(e) => tracing::warn!("profile: rejected profile from {username}: {e}"),
                                     }
@@ -717,7 +752,28 @@ pub fn broadcast_users(state: &Arc<AppState>) {
     tokio::spawn(async move {
         let all = crate::db::all_known_users(&state.pool).await.unwrap_or_default();
         let owner = crate::admin::owner_username(&state.pool).await;
-        let _ = state.tx.send(serde_json::json!({ "type": "users", "online": online, "presence": statuses, "all": all, "owner": owner }).to_string());
+        // What to call people: "nicknames" are this server's own (set_nickname),
+        // "global_nicknames" the ones from their profiles. A client shows
+        // the server nickname, else the global one, else the username.
+        let mut nicknames = serde_json::Map::new();
+        let mut global_nicknames = serde_json::Map::new();
+        if let Ok(rows) = sqlx::query("SELECT username, public_key, nickname FROM users").fetch_all(&state.pool).await {
+            for r in rows {
+                let user: String = r.get("username");
+                let nick: String = r.get("nickname");
+                if !nick.is_empty() {
+                    nicknames.insert(user.clone(), serde_json::Value::String(nick));
+                }
+                let global = crate::profile::global_nickname(&r.get::<String, _>("public_key").to_lowercase());
+                if !global.is_empty() {
+                    global_nicknames.insert(user, serde_json::Value::String(global));
+                }
+            }
+        }
+        let _ = state.tx.send(serde_json::json!({
+            "type": "users", "online": online, "presence": statuses, "all": all, "owner": owner,
+            "nicknames": nicknames, "global_nicknames": global_nicknames,
+        }).to_string());
     });
 }
 
