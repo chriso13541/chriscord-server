@@ -51,6 +51,9 @@ struct ClientMsg {
     target:          Option<String>,
     /// voice_screen: whether their screen share is now on
     screen:          Option<bool>,
+    /// voice_screen_window: where the window they're sharing is —
+    /// "focused", "background" (behind other windows) or "minimized"
+    window:          Option<String>,
     /// voice_watch: start (true) or stop watching target's screen
     watch:           Option<bool>,
     /// voice_keyframe: "screen" for a screen share, else their camera
@@ -206,6 +209,7 @@ async fn handle_socket(socket: WebSocket, token: String, initial_status: Option<
                                         // Cameras start off; the app says when it turns one on.
                                         { video_on().lock().unwrap().remove(&username); }
                                         { screen_on().lock().unwrap().remove(&username); }
+                                        { screen_window().lock().unwrap().remove(&username); }
                                         // Mute/deafen start as whatever the app says it is right
                                         // now — never carried over from an earlier session, which
                                         // is how someone could show as muted while talking.
@@ -330,6 +334,7 @@ async fn handle_socket(socket: WebSocket, token: String, initial_status: Option<
                                             let mut set = screen_on().lock().unwrap();
                                             if on { set.insert(username.clone()); } else { set.remove(&username); }
                                         }
+                                        if !on { screen_window().lock().unwrap().remove(&username); }
                                         broadcast_voice_state(&state);
                                         if !on {
                                             voice::screen_stopped(&state, &bid, &username).await;
@@ -337,6 +342,26 @@ async fn handle_socket(socket: WebSocket, token: String, initial_status: Option<
                                             // A share (re)starting: who's watching it so far.
                                             voice::notify_screen_viewers(&state, &bid, &username).await;
                                         }
+                                    }
+                                }
+                            }
+                            // Where the window being shared is, so the people watching
+                            // can be told why the picture stopped (a minimised window
+                            // isn't drawn by Windows at all). Kept even if it arrives
+                            // just before voice_screen; only sent out while sharing.
+                            "voice_screen_window" if !may_control_voice(&username, conn_id) => {}
+                            "voice_screen_window" => {
+                                if let (Some(bid), Some(w)) = (cm.board_id, cm.window.as_deref()) {
+                                    let in_channel = { state.voice.lock().unwrap().get(&username) == Some(&bid) };
+                                    if in_channel {
+                                        let changed = {
+                                            let mut m = screen_window().lock().unwrap();
+                                            match w {
+                                                "background" | "minimized" => m.insert(username.clone(), w.to_string()).as_deref() != Some(w),
+                                                _ => m.remove(&username).is_some(),
+                                            }
+                                        };
+                                        if changed { broadcast_voice_state(&state); }
                                     }
                                 }
                             }
@@ -685,6 +710,13 @@ fn screen_on() -> &'static std::sync::Mutex<std::collections::HashSet<String>> {
     ON.get_or_init(|| std::sync::Mutex::new(std::collections::HashSet::new()))
 }
 
+/// username → where the window they're sharing is, when it isn't in front:
+/// "background" or "minimized" (see voice_screen_window).
+fn screen_window() -> &'static std::sync::Mutex<std::collections::HashMap<String, String>> {
+    static W: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, String>>> = std::sync::OnceLock::new();
+    W.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
 fn video_on() -> &'static std::sync::Mutex<std::collections::HashSet<String>> {
     static ON: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<String>>> = std::sync::OnceLock::new();
     ON.get_or_init(|| std::sync::Mutex::new(std::collections::HashSet::new()))
@@ -726,9 +758,15 @@ fn broadcast_voice_state(state: &Arc<AppState>) {
         let on = screen_on().lock().unwrap();
         on.iter().filter(|u| voice.contains_key(*u)).cloned().collect()
     };
+    // For the people watching: a sharer's window that's out of focus or
+    // minimised (absent = in front, or sharing a whole screen).
+    let screen_window: serde_json::Map<String, serde_json::Value> = {
+        let w = screen_window().lock().unwrap();
+        screens.iter().filter_map(|u| w.get(u).map(|s| (u.clone(), serde_json::Value::String(s.clone())))).collect()
+    };
     let _ = state.tx.send(serde_json::json!({
         "type": "voice_state", "channels": channels, "reconnecting": reconnecting, "mute_states": mute_states,
-        "video_on": video, "screen_on": screens,
+        "video_on": video, "screen_on": screens, "screen_window": screen_window,
     }).to_string());
 }
 
