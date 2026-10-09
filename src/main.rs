@@ -17,6 +17,8 @@ mod utils;
 mod voice;
 mod roles;
 mod ws;
+mod zipfile;
+mod zips;
 
 use axum::{
     extract::DefaultBodyLimit,
@@ -114,6 +116,7 @@ async fn main() {
     layout::init(&pool).await.expect("Failed to set up channel ordering");
     emojis::init(&pool).await.expect("Failed to set up custom emoji");
     stickers::init(&pool).await.expect("Failed to set up stickers");
+    zips::clear_leftovers(); // "Download all" zips from before a restart
 
     let owner_key =
         db::get_or_create_config(&pool, "owner_key", || utils::generate_hex(32))
@@ -136,6 +139,7 @@ async fn main() {
         voice_reconnecting: Mutex::new(HashMap::new()),
         voice_runtime: voice::VoiceRuntime::new().await,
         file_links: Mutex::new(HashMap::new()),
+        zips: zips::Zips::new(),
     });
     let state_for_shutdown = state.clone();
 
@@ -218,6 +222,8 @@ async fn main() {
             .layer(DefaultBodyLimit::disable()))
         .route("/api/files/:filename",  get(files::serve_file))
         .route("/api/files/:filename/link", get(files::file_link))
+        .route("/api/messages/:id/zip/link", get(zips::zip_link))
+        .route("/api/zips/:file",       get(zips::serve_zip))
         .route("/api/pfp/:username",    get(pfp::serve_pfp))
         .route("/api/profile/:username", get(profile::get_profile))
         .route("/api/banner/:username",  get(profile::serve_banner))

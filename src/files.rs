@@ -13,7 +13,7 @@ use tokio::io::AsyncWriteExt;
 
 use crate::{db, state::AppState};
 
-const UPLOAD_DIR:      &str   = "./uploads";
+pub(crate) const UPLOAD_DIR:      &str   = "./uploads";
 
 #[derive(Serialize)]
 pub struct UploadResp {
@@ -120,11 +120,11 @@ pub struct FileQuery {
 
 /// How long a file link stays usable. Checked when each request STARTS,
 /// so a big download begun inside the window runs to completion.
-const LINK_TTL: Duration = Duration::from_secs(5 * 60);
+pub(crate) const LINK_TTL: Duration = Duration::from_secs(5 * 60);
 
 /// Strips anything path-like from a requested filename; None if nothing
 /// usable is left.
-fn safe_name(filename: &str) -> Option<&str> {
+pub(crate) fn safe_name(filename: &str) -> Option<&str> {
     let safe = std::path::Path::new(filename).file_name()?.to_str()?;
     if safe.is_empty() || safe.starts_with('.') { None } else { Some(safe) }
 }
@@ -234,7 +234,7 @@ pub async fn serve_file(
 /// carries the real name with any Unicode intact; every current browser
 /// prefers the latter. Anything that could break out of the header or
 /// point at a directory is dropped first.
-fn attachment_disposition(name: &str) -> String {
+pub(crate) fn attachment_disposition(name: &str) -> String {
     let cleaned: String = name
         .chars()
         .filter(|c| !c.is_control() && !matches!(c, '/' | '\\' | '"'))

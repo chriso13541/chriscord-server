@@ -48,4 +48,6 @@ pub struct AppState {
     /// a request carrying a session token). In memory on purpose: a server
     /// restart just means clients ask for fresh links.
     pub file_links: Mutex<HashMap<String, (String, Instant)>>,
+    /// "Download all" zips and their links (see zips.rs).
+    pub zips: crate::zips::Zips,
 }
