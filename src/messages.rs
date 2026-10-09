@@ -50,6 +50,11 @@ pub struct Attachment {
     pub url:  String,
     pub name: String,
     pub mime: String,
+    /// Marked as a spoiler by the sender: clients show it blurred until
+    /// it's clicked. Left out of the JSON when false, so ordinary
+    /// attachments are stored and sent exactly as before.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub spoiler: bool,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -161,6 +166,7 @@ pub fn row_to_msg(r: &sqlx::sqlite::SqliteRow) -> ChatMessage {
                     url:  u,
                     name: name.unwrap_or_default(),
                     mime: mime.unwrap_or_default(),
+                    spoiler: false,
                 }],
                 None => vec![],
             }
