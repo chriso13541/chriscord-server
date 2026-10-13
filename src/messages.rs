@@ -322,7 +322,7 @@ pub async fn get_messages_around(
 /// Text matching uses the FTS5 full-text index (whole words, ignoring case
 /// and accents); filters are plain SQL conditions on the same query. At
 /// least one of text or a filter is needed. Newest SEARCH_LIMIT matches,
-/// returned in chronological order like get_messages.
+/// newest first.
 pub async fn search_messages(
     headers:  HeaderMap,
     Query(q): Query<SearchQuery>,
@@ -412,12 +412,96 @@ pub async fn search_messages(
         .filter(|r| use_fts || term.is_empty() || contains_whole_word(&r.message.content, &term))
         .take(SEARCH_LIMIT)
         .collect();
-    matches.reverse(); // newest-first -> chronological, matching get_messages
+    // Newest first: what you're looking for is usually recent.
     let mut msgs: Vec<ChatMessage> = matches.iter().map(|m| m.message.clone()).collect();
     attach_reactions(&s.pool, &mut msgs).await;
     for (m, with) in matches.iter_mut().zip(msgs) { m.message.reactions = with.reactions; }
 
     Ok(Json(matches))
+}
+
+/// Most messages one /api/search/scan page may hold, and how many it holds
+/// unless asked for fewer.
+const SCAN_MAX: i64 = 1000;
+const SCAN_DEFAULT: i64 = 500;
+
+#[derive(Deserialize)]
+pub struct ScanQuery {
+    pub from: Option<String>,
+    pub has: Option<String>,
+    #[serde(rename = "in")]
+    pub in_board: Option<String>,
+    pub after: Option<String>,
+    pub before: Option<String>,
+    /// Carry on from here: only messages older than this id (UUIDv7).
+    pub cursor: Option<String>,
+    pub limit: Option<i64>,
+}
+
+/// GET /api/search/scan — search for end-to-end encrypted messages. The
+/// server can't read their text (or their files' names and types), so the
+/// app does the matching: this hands it messages newest-first, a page at a
+/// time, narrowed down by what the server can still see — who sent it,
+/// where, when, and whether it has attachments at all. `next` is the cursor
+/// for the following page (null when there's nothing older).
+pub async fn search_scan(
+    headers:  HeaderMap,
+    Query(q): Query<ScanQuery>,
+    State(s): State<Arc<AppState>>,
+) -> Result<Json<serde_json::Value>, ApiErr> {
+    let username = db::verify_token(&s.pool, token_from(&headers)).await
+        .map_err(|_| db_err())?.ok_or_else(unauth)?;
+
+    let mut wheres: Vec<String> = Vec::new();
+    let mut binds: Vec<String> = Vec::new();
+    if let Some(from) = q.from.as_deref().map(str::trim).filter(|f| !f.is_empty()) {
+        wheres.push("m.username = ? COLLATE NOCASE".into());
+        binds.push(from.to_string());
+    }
+    if let Some(board) = q.in_board.as_deref().map(str::trim).filter(|b| !b.is_empty()) {
+        wheres.push("m.board_id = ?".into());
+        binds.push(board.to_string());
+    }
+    // has: anything but link needs attachments; which kind they are is
+    // inside the encrypted message, so the app checks that.
+    if q.has.as_deref().unwrap_or("").split(',').map(|k| k.trim().to_lowercase()).any(|k| !k.is_empty() && k != "link") {
+        wheres.push("((m.attachments IS NOT NULL AND m.attachments NOT IN ('', '[]')) OR m.attachment_url IS NOT NULL)".into());
+    }
+    if let Some(after) = q.after.as_deref().filter(|d| !d.is_empty()) {
+        wheres.push("julianday(m.created_at) >= julianday(?)".into());
+        binds.push(after.to_string());
+    }
+    if let Some(before) = q.before.as_deref().filter(|d| !d.is_empty()) {
+        wheres.push("julianday(m.created_at) < julianday(?)".into());
+        binds.push(before.to_string());
+    }
+    if let Some(cursor) = q.cursor.as_deref().filter(|c| !c.is_empty()) {
+        wheres.push("m.id < ?".into());
+        binds.push(cursor.to_string());
+    }
+    // Only channels you can see.
+    if let Some(v) = crate::access::visible_for(&s.pool, &username).await {
+        if v.boards.is_empty() {
+            return Ok(Json(serde_json::json!({ "messages": [], "next": null })));
+        }
+        wheres.push(format!("m.board_id IN ({})", vec!["?"; v.boards.len()].join(",")));
+        binds.extend(v.boards.into_iter());
+    }
+
+    let limit = q.limit.unwrap_or(SCAN_DEFAULT).clamp(1, SCAN_MAX);
+    let where_sql = if wheres.is_empty() { String::new() } else { format!(" WHERE {}", wheres.join(" AND ")) };
+    let sql = format!("{}{} ORDER BY m.id DESC LIMIT {limit}", SEARCH_SELECT, where_sql);
+    let mut query = sqlx::query(&sql);
+    for b in &binds {
+        query = query.bind(b);
+    }
+    let rows = query.fetch_all(&s.pool).await.map_err(|e| {
+        tracing::warn!("search scan failed: {e}");
+        db_err()
+    })?;
+    let messages: Vec<SearchResult> = rows.iter().map(row_to_search_result).collect();
+    let next = if messages.len() as i64 == limit { messages.last().map(|m| m.message.id.clone()) } else { None };
+    Ok(Json(serde_json::json!({ "messages": messages, "next": next })))
 }
 
 /// Turns typed text into an FTS5 query: every word must appear (in any
@@ -694,7 +778,9 @@ pub async fn attach_replies(pool: &sqlx::SqlitePool, msgs: &mut [ChatMessage]) {
             .unwrap_or_else(|| r.try_get::<Option<String>, _>("attachment_url").ok().flatten().map_or(0, |_| 1));
         (id.clone(), ReplyPreview {
             id, username: r.get("username"),
-            content: content.chars().take(200).collect(),
+            // An end-to-end encrypted message is kept whole: cut short, it
+            // couldn't be decrypted (the app shortens it once it has).
+            content: if content.starts_with("e2ee:") { content } else { content.chars().take(200).collect() },
             attachments: files, deleted: false,
         })
     }).collect();

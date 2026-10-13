@@ -215,6 +215,7 @@ async fn main() {
             get(messages::get_messages).post(messages::post_message))
         .route("/api/boards/:id/messages/around/:message_id", get(messages::get_messages_around))
         .route("/api/search", get(messages::search_messages))
+        .route("/api/search/scan", get(messages::search_scan)) // encrypted messages: the app matches
         .route("/api/messages/:id",
             patch(messages::edit_message).delete(messages::delete_message))
         .route("/api/boards/:id/pins",   get(messages::get_pins))
