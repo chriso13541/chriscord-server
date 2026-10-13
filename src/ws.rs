@@ -605,6 +605,10 @@ async fn handle_socket(socket: WebSocket, token: String, initial_status: Option<
                                 Some("voice_state") => true,
                                 Some("roles_updated") => true,
                                 Some("emojis_updated") | Some("stickers_updated") => true,
+                                // Message encryption keys moved (channel_keys.rs): the app shares
+                                // keys others need and retries messages it couldn't open. Only for
+                                // channels this member can see (or none named).
+                                Some("e2ee_changed") => v["board_id"].as_str().map_or(true, |b| sees(&visible, b)),
                                 Some("action_denied") => v["target"].as_str() == Some(username.as_str()),
                                 // Speaking rings are only for people in that same call —
                                 // someone just browsing the server still gets voice_state

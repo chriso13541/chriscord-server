@@ -1,4 +1,5 @@
 mod access;
+mod channel_keys;
 mod admin;
 mod invites;
 mod layout;
@@ -116,6 +117,7 @@ async fn main() {
     layout::init(&pool).await.expect("Failed to set up channel ordering");
     emojis::init(&pool).await.expect("Failed to set up custom emoji");
     stickers::init(&pool).await.expect("Failed to set up stickers");
+    channel_keys::init(&pool).await.expect("Failed to set up message encryption keys");
     zips::clear_leftovers(); // "Download all" zips from before a restart
 
     let owner_key =
@@ -216,6 +218,11 @@ async fn main() {
         .route("/api/messages/:id",
             patch(messages::edit_message).delete(messages::delete_message))
         .route("/api/boards/:id/pins",   get(messages::get_pins))
+        // End-to-end encrypted messages: channel keys, sealed per member (channel_keys.rs).
+        .route("/api/boards/:id/keys",  get(channel_keys::get_keys).post(channel_keys::new_generation))
+        .route("/api/e2ee/enc-key",     put(channel_keys::put_enc_key))
+        .route("/api/e2ee/pending",     get(channel_keys::pending))
+        .route("/api/e2ee/boxes",       post(channel_keys::add_boxes))
         .route("/api/messages/:id/reactions", post(messages::react))
         .route("/api/messages/:id/pin",  put(messages::pin_message).delete(messages::unpin_message))
         .route("/api/upload", post(files::upload)
