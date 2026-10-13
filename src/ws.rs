@@ -77,6 +77,10 @@ struct ClientMsg {
     status:          Option<String>,
     /// typing: whether they're typing right now
     typing:          Option<bool>,
+    /// voice_e2ee: who it's for (absent: everyone in the call)
+    to:              Option<String>,
+    /// voice_e2ee: the key-exchange message itself — opaque to the server
+    data:            Option<serde_json::Value>,
 }
 
 pub async fn ws_handler(
@@ -400,6 +404,26 @@ async fn handle_socket(socket: WebSocket, token: String, initial_status: Option<
                                     }
                                 }
                             }
+                            // Call encryption's key exchange (the app's e2ee.go): call keys
+                            // and wrapped sending keys, passed between the people in one
+                            // call. The server can't read or forge them — it only relays,
+                            // adding who sent it and their identity key (which the apps
+                            // check the sender's signature against).
+                            "voice_e2ee" if !may_control_voice(&username, conn_id) => {}
+                            "voice_e2ee" => {
+                                if let (Some(bid), Some(data)) = (cm.board_id, cm.data) {
+                                    let in_channel = { state.voice.lock().unwrap().get(&username) == Some(&bid) };
+                                    if in_channel && data.is_object() && data.to_string().len() <= VOICE_E2EE_MAX {
+                                        let from_key: String = sqlx::query("SELECT public_key FROM users WHERE username = ?")
+                                            .bind(&username).fetch_optional(&state.pool).await.ok().flatten()
+                                            .map(|r| r.get("public_key")).unwrap_or_default();
+                                        let _ = state.tx.send(serde_json::json!({
+                                            "type": "voice_e2ee", "board_id": bid, "from": username,
+                                            "from_key": from_key, "to": cm.to, "data": data,
+                                        }).to_string());
+                                    }
+                                }
+                            }
                             "voice_mute_state" if !may_control_voice(&username, conn_id) => {}
                             "voice_mute_state" => {
                                 if let Some(bid) = cm.board_id {
@@ -591,6 +615,15 @@ async fn handle_socket(socket: WebSocket, token: String, initial_status: Option<
                                         && voice_owner(&username) == Some(conn_id) // not your other devices
                                 }
                                 Some("voice_moved") => v["target"].as_str() == Some(username.as_str()) && v["target_conn"].as_u64() == Some(conn_id),
+                                // Key exchange: only to the others in that same call (just the
+                                // one it's addressed to, if it is), on the device in the call.
+                                Some("voice_e2ee") => {
+                                    let my_board = state.voice.lock().unwrap().get(&username).cloned();
+                                    my_board.as_deref().is_some() && v["board_id"].as_str() == my_board.as_deref()
+                                        && voice_owner(&username) == Some(conn_id)
+                                        && v["from"].as_str() != Some(username.as_str())
+                                        && (v["to"].is_null() || v["to"].as_str() == Some(username.as_str()))
+                                }
                                 Some("voice_mute_state") => true,
                                 Some("pfp_updated") | Some("profile_updated") => true,
                                 Some("message") => v["data"]["board_id"].as_str().map_or(true, |b| sees(&visible, b)),
@@ -724,6 +757,10 @@ fn video_on() -> &'static std::sync::Mutex<std::collections::HashSet<String>> {
 fn voice_owner(user: &str) -> Option<u64> { voice_owners().lock().unwrap().get(user).copied() }
 /// True if this connection may act on the account's call: it's the owner,
 /// or nobody owns it right now.
+/// The most a voice_e2ee message may be (bytes of JSON): a call key and
+/// its signature, or one wrapped key, are a few hundred.
+const VOICE_E2EE_MAX: usize = 4096;
+
 fn may_control_voice(user: &str, conn: u64) -> bool { voice_owner(user).map_or(true, |o| o == conn) }
 
 fn broadcast_voice_state(state: &Arc<AppState>) {
