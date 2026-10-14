@@ -135,14 +135,18 @@ pub async fn get_profile(
     Path(username): Path<String>,
     State(s): State<Arc<AppState>>,
 ) -> Response {
-    if crate::db::verify_token(&s.pool, token_from(&headers)).await.ok().flatten().is_none() {
+    let Some(viewer) = crate::db::verify_token(&s.pool, token_from(&headers)).await.ok().flatten() else {
         return StatusCode::UNAUTHORIZED.into_response();
-    }
+    };
     let row = sqlx::query("SELECT created_at, public_key, nickname FROM users WHERE username = ?")
         .bind(&username).fetch_optional(&s.pool).await;
     let (member_since, key, server_nick): (String, String, String) = match row {
         Ok(Some(r)) => (r.get("created_at"), r.get::<String, _>("public_key").to_lowercase(), r.get("nickname")),
-        Ok(None) => return StatusCode::NOT_FOUND.into_response(),
+        // Not a member: maybe someone imported from Discord, not yet claimed.
+        Ok(None) => return match crate::imports::placeholder_profile(&s.pool, &username, &viewer).await {
+            Some(p) => Json(p).into_response(),
+            None => StatusCode::NOT_FOUND.into_response(),
+        },
         Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     };
     let p = read_stored(&key).unwrap_or_default();

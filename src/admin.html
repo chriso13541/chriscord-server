@@ -115,6 +115,13 @@
   .dot { display:inline-block; width:8px; height:8px; border-radius:50%; margin-right:6px; background:var(--muted); }
   .dot.online { background:var(--green); } .dot.idle { background:var(--yellow); }
   .acts { display:flex; gap:6px; justify-content:flex-end; flex-wrap:wrap; }
+  /* Imported members, hosted servers */
+  .nav-badge { margin-left:auto; min-width:18px; height:18px; padding:0 5px; border-radius:9px; background:var(--red); color:#fff; font-size:.72rem; font-weight:700; display:inline-flex; align-items:center; justify-content:center; }
+  .req { display:flex; gap:6px; align-items:center; justify-content:flex-end; flex-wrap:wrap; margin:3px 0; }
+  .req select { max-width:220px; }
+  a.btnlink { display:inline-flex; align-items:center; gap:6px; border-radius:6px; padding:5px 10px; font-size:.82rem; background:var(--surface2); color:var(--text); text-decoration:none; }
+  a.btnlink:hover { filter:brightness(1.12); }
+  .host-log { margin:0; padding:8px 10px; border-radius:6px; background:var(--bg); color:var(--muted); font:.78rem/1.4 Consolas,monospace; white-space:pre-wrap; word-break:break-word; max-height:160px; overflow:auto; }
   /* channel access */
   .access { display:flex; align-items:center; gap:8px; flex-wrap:wrap; margin:8px 0 2px; font-size:.85rem; color:var(--muted); }
   .access select { width:auto; padding:4px 8px; font-size:.82rem; }
@@ -233,6 +240,9 @@
 <symbol id="i-image" viewBox="0 -960 960 960"><path d="M200-120q-33 0-56.5-23.5T120-200v-560q0-33 23.5-56.5T200-840h560q33 0 56.5 23.5T840-760v560q0 33-23.5 56.5T760-120H200Zm0-80h560v-560H200v560Zm40-80h480L570-480 450-320l-90-120-120 160Zm-40 80v-560 560Z"/></symbol>
 <symbol id="i-close" viewBox="0 -960 960 960"><path d="m256-200-56-56 224-224-224-224 56-56 224 224 224-224 56 56-224 224 224 224-56 56-224-224-224 224Z"/></symbol>
 <symbol id="i-check" viewBox="0 -960 960 960"><path d="M382-240 154-468l57-57 171 171 367-367 57 57-424 424Z"/></symbol>
+<symbol id="i-import" viewBox="0 -960 960 960"><path d="M440-840h80v400l120-120 56 56-216 216-216-216 56-56 120 120Zm-280 520h80v120h480v-120h80v200H160Z"/></symbol>
+<symbol id="i-servers" viewBox="0 -960 960 960"><path fill-rule="evenodd" d="M160-840h640v320H160Zm60 60v200h520v-200Zm40 70h80v60h-80ZM160-440h640v320H160Zm60 60v200h520v-200Zm40 70h80v60h-80Z"/></symbol>
+<symbol id="i-open" viewBox="0 -960 960 960"><path d="M200-120q-33 0-56.5-23.5T120-200v-560q0-33 23.5-56.5T200-840h280v80H200v560h560v-280h80v280q0 33-23.5 56.5T760-120H200Zm188-212-56-56 372-372H560v-80h280v280h-80v-144L388-332Z"/></symbol>
 <symbol id="i-crown" viewBox="0 -960 960 960"><path d="M200-160v-80h560v80H200Zm0-140-51-321q-2 0-4.5.5t-4.5.5q-25 0-42.5-17.5T80-680q0-25 17.5-42.5T140-740q25 0 42.5 17.5T200-680q0 7-1.5 13t-3.5 11l125 56 125-171q-11-8-18-21t-7-28q0-25 17.5-42.5T480-880q25 0 42.5 17.5T540-820q0 15-7 28t-18 21l125 171 125-56q-2-5-3.5-11t-1.5-13q0-25 17.5-42.5T820-740q25 0 42.5 17.5T880-680q0 25-17.5 42.5T820-620q-2 0-4.5-.5t-4.5-.5l-51 321H200Z"/></symbol>
 </svg>
 
@@ -263,6 +273,8 @@
     <a data-sec="members"><svg class="ic"><use href="#i-group"/></svg>Members</a>
     <a data-sec="roles"><svg class="ic"><use href="#i-shield_person"/></svg>Roles</a>
     <a data-sec="bans"><svg class="ic"><use href="#i-block"/></svg>Bans</a>
+    <a data-sec="imported"><svg class="ic"><use href="#i-import"/></svg>Imported members<span class="nav-badge" id="claims-badge" hidden></span></a>
+    <a data-sec="hosting"><svg class="ic"><use href="#i-servers"/></svg>Hosted servers</a>
     <div class="spacer"></div>
     <a id="signout"><svg class="ic"><use href="#i-logout"/></svg>Sign out</a>
   </nav>
@@ -440,6 +452,44 @@
           <tbody id="bans"></tbody></table>
       </div>
     </section>
+
+    <!-- Imported members -->
+    <section id="sec-imported">
+      <h2>Imported members</h2><p class="sub">People whose messages came over from Discord with <code>chriscord-import</code>.
+        Until someone claims them, their messages show under the name here. When a member clicks one of those names in the app
+        and picks <b>This is me</b>, the request shows up below — approving it moves those messages to their account
+        (their picture and name, and they can edit or delete them). You can also link someone directly.</p>
+      <div class="card" style="padding:8px 12px">
+        <table><thead><tr><th>On Discord</th><th>Messages</th><th>Now shown as</th><th style="text-align:right">Claim</th></tr></thead>
+          <tbody id="imported"></tbody></table>
+      </div>
+      <p class="hint" id="imported-account"></p>
+    </section>
+
+    <!-- Hosted servers -->
+    <section id="sec-hosting">
+      <h2>Hosted servers</h2><p class="sub">More Chriscord servers on this machine, each completely separate — its own members,
+        channels, owner key and admin panel. Each runs on its own port, used for chat (TCP) and voice (UDP) like this one's
+        <b id="host-main-port">7070</b>: forward it the same way (or point a domain at it with your reverse proxy), and people add it
+        in the app as <code>your-address:port</code>. They start with this server and stop with it.</p>
+      <div id="host-unavailable" class="card empty" hidden>This server is itself hosted by another Chriscord server — manage hosted
+        servers from that one's admin panel.</div>
+      <div id="host-body">
+        <div class="card" style="padding:8px 12px">
+          <table><thead><tr><th>Server</th><th>Port</th><th>Status</th><th style="text-align:right">Actions</th></tr></thead>
+            <tbody id="hosted"></tbody></table>
+        </div>
+        <div class="card">
+          <h3 style="margin-bottom:10px">Add a server</h3>
+          <div class="row" style="gap:10px;flex-wrap:wrap;align-items:flex-end">
+            <div><label class="f" for="host-name">Name</label><input type="text" id="host-name" maxlength="64" placeholder="My friends' server"></div>
+            <div><label class="f" for="host-port">Port</label><input type="number" id="host-port" min="1024" max="65535" style="width:120px"></div>
+            <button id="host-add"><svg class="ic"><use href="#i-add"/></svg>Create and start</button>
+            <span class="msg" id="host-msg"></span>
+          </div>
+        </div>
+      </div>
+    </section>
   </main>
 </div>
 
@@ -575,13 +625,17 @@ document.querySelectorAll('nav a[data-sec]').forEach(a => a.onclick = () => {
   if (a.dataset.sec === 'bans') loadBans();
   if (a.dataset.sec === 'uploads') loadStorage();
   if (a.dataset.sec === 'roles') loadRoles();
+  if (a.dataset.sec === 'imported') loadImported();
+  clearInterval(hostTimer);
+  if (a.dataset.sec === 'hosting') { loadHosting(); hostTimer = setInterval(() => loadHosting(true), 4000); }
 });
+let hostTimer = 0;
 
 // ── Load ─────────────────────────────────────────────────────────────
 let info = {};
 async function loadAll() {
   await loadInfo();
-  await Promise.all([loadRooms(), loadMembers(), loadBans(), loadTheme()]);
+  await Promise.all([loadRooms(), loadMembers(), loadBans(), loadTheme(), loadImported().catch(() => {})]);
 }
 async function loadInfo() {
   info = await api('/api/admin/info');
@@ -1118,6 +1172,132 @@ async function loadBans() {
     tb.appendChild(tr);
   }
 }
+
+// ── Imported members ─────────────────────────────────────────────────
+async function loadImported() {
+  const data = await api('/api/admin/imported');
+  const list = data.authors || [];
+  const pending = list.reduce((n, a) => n + (a.claimed_by ? 0 : a.requests.length), 0);
+  $('claims-badge').hidden = !pending; $('claims-badge').textContent = pending;
+  $('imported-account').textContent = data.import_account
+    ? `The importer signed in as the member “${data.import_account}”. It holds the imported channels' keys until it has passed them on to members, so keep it until everyone who should can read the history — then you can kick it.`
+    : '';
+  const tb = $('imported'); tb.innerHTML = '';
+  if (!list.length) { tb.innerHTML = '<tr><td colspan="4" class="empty">Nothing imported yet. See chriscord-import to bring a Discord server’s history over.</td></tr>'; return; }
+  let members = [];
+  try { members = (await api('/api/admin/members')).map(m => m.username); } catch {}
+  for (const a of list) {
+    const tr = document.createElement('tr');
+    const avColour = a.colour || colour(a.name || a.placeholder);
+    const claim = a.claimed_by
+      ? `<span class="hint">Claimed by</span> <b>${esc(a.claimed_by)}</b> <button class="small ghost" data-unlink>Unlink</button>`
+      : `${a.requests.map(r => `<div class="req"><b>${esc(r.username)}</b> <span class="hint">says it’s them</span>
+           <button class="small" data-approve="${esc(r.username)}">${icon('check')}Approve</button>
+           <button class="small ghost" data-deny="${esc(r.public_key)}">Decline</button></div>`).join('')}
+         <div class="req"><select data-pick><option value="">Link to a member…</option>${members.filter(u => u !== data.import_account).map(u => `<option>${esc(u)}</option>`).join('')}</select></div>`;
+    tr.innerHTML = `
+      <td><div class="who"><div class="av" style="background:${avColour}">${esc((a.name || '?')[0].toUpperCase())}</div>
+        <div><div class="name">${esc(a.name)}</div><div class="fp">${a.handle && a.handle !== a.name ? '@' + esc(a.handle) + ' · ' : ''}${esc(a.source)} ${esc(a.id)}</div></div></div></td>
+      <td>${a.messages}</td>
+      <td>${esc(a.claimed_by || a.placeholder)}</td>
+      <td style="text-align:right">${claim}</td>`;
+    const link = async username => {
+      try { const r = await api(`/api/admin/imported/${encodeURIComponent(a.source)}/${encodeURIComponent(a.id)}/link`, { json: { username } });
+        toast(`${a.name}'s ${r.messages} message(s) are now ${username}'s`); loadImported(); }
+      catch (e) { toast(e.message, true); }
+    };
+    tr.querySelectorAll('[data-approve]').forEach(b => b.onclick = () => link(b.dataset.approve));
+    tr.querySelectorAll('[data-deny]').forEach(b => b.onclick = async () => {
+      try { await api(`/api/admin/imported/${encodeURIComponent(a.source)}/${encodeURIComponent(a.id)}/requests/${encodeURIComponent(b.dataset.deny)}`, { method: 'DELETE' }); loadImported(); }
+      catch (e) { toast(e.message, true); }
+    });
+    const pick = tr.querySelector('[data-pick]');
+    if (pick) pick.onchange = () => { const u = pick.value; if (!u) return;
+      confirmBox(`Give ${a.name}'s messages to ${u}?`, `All ${a.messages} of them will show as ${u}'s, and ${u} will be able to edit and delete them. You can unlink it again.`, 'Link', () => link(u)); pick.value = ''; };
+    const un = tr.querySelector('[data-unlink]');
+    if (un) un.onclick = () => confirmBox(`Unlink ${a.name}?`, `Their messages go back to showing as an imported member.`, 'Unlink', async () => {
+      await api(`/api/admin/imported/${encodeURIComponent(a.source)}/${encodeURIComponent(a.id)}/unlink`, { method: 'POST' }); loadImported(); });
+    tb.appendChild(tr);
+  }
+}
+
+// ── Hosted servers ───────────────────────────────────────────────────
+async function loadHosting(quiet = false) {
+  let data;
+  try { data = await api('/api/admin/hosting'); } catch (e) { if (!quiet) toast(e.message, true); return; }
+  $('host-main-port').textContent = data.port;
+  $('host-unavailable').hidden = data.available; $('host-body').hidden = !data.available;
+  if (!data.available) return;
+  const used = new Set([data.port, ...data.servers.map(x => x.port)]);
+  if (!$('host-port').value) { let p = data.port + 1; while (used.has(p)) p++; $('host-port').value = p; }
+  const tb = $('hosted');
+  // Don't rebuild while someone's using a control in it.
+  if (quiet && tb.contains(document.activeElement)) return;
+  tb.innerHTML = '';
+  if (!data.servers.length) { tb.innerHTML = '<tr><td colspan="4" class="empty">None yet — add one below.</td></tr>'; return; }
+  for (const x of data.servers) {
+    const st = x.status || {}, state = st.state || 'stopped';
+    const dot = state === 'running' ? 'online' : state === 'stopped' ? '' : 'idle';
+    const label = { running: 'Running', starting: 'Starting', restarting: 'Restarting', stopped: 'Stopped', failed: 'Failed' }[state] || state;
+    const addr = `${location.protocol}//${location.hostname}:${x.port}/admin`;
+    const tr = document.createElement('tr');
+    tr.innerHTML = `
+      <td><div class="name">${esc(x.name)}</div><div class="fp" title="Where its data is">${esc(x.data_dir)}</div></td>
+      <td>${x.port}</td>
+      <td><span class="dot ${dot}"></span>${label}${st.restarts ? ` <span class="hint">(${st.restarts} restart${st.restarts === 1 ? '' : 's'})</span>` : ''}</td>
+      <td><div class="acts">
+        <a class="btnlink small ghost" href="${esc(addr)}" target="_blank" rel="noopener">${icon('open')}Admin panel</a>
+        <button class="small ghost" data-key>${icon('content_copy')}Owner key</button>
+        ${state === 'stopped' || state === 'failed' ? `<button class="small" data-act="start">Start</button>` : `<button class="small ghost" data-act="restart">${icon('refresh')}Restart</button><button class="small ghost" data-act="stop">Stop</button>`}
+        <button class="small danger" data-remove>${icon('delete')}</button></div></td>`;
+    tb.appendChild(tr);
+    if ((state === 'failed' || state === 'restarting') && st.last_log?.length) {
+      const lr = document.createElement('tr');
+      lr.innerHTML = `<td colspan="4"><pre class="host-log">${esc(st.last_log.join('\n'))}</pre></td>`;
+      tb.appendChild(lr);
+    }
+    tr.querySelectorAll('[data-act]').forEach(b => b.onclick = async () => {
+      b.disabled = true;
+      try { await api(`/api/admin/hosting/${x.id}/${b.dataset.act}`, { method: 'POST' }); } catch (e) { toast(e.message, true); }
+      loadHosting();
+    });
+    tr.querySelector('[data-key]').onclick = async () => {
+      try { const r = await api(`/api/admin/hosting/${x.id}/owner-key`);
+        await navigator.clipboard.writeText(r.owner_key).then(() => toast(`${x.name}'s owner key copied`), () => prompt(`${x.name}'s owner key`, r.owner_key)); }
+      catch (e) { toast(e.message, true); }
+    };
+    tr.querySelector('[data-remove]').onclick = () => removeHosted(x);
+  }
+}
+function removeHosted(x) {
+  const box = $('modal-box');
+  box.innerHTML = `<h3>Remove ${esc(x.name)}?</h3><p class="hint">It stops, and comes off this list. Its data (members, messages, uploads)
+      stays in <code>${esc(x.data_dir)}</code> unless you tick the box — then it's gone for good.</p>
+    <label class="row" style="gap:8px;margin:12px 0;cursor:pointer"><input type="checkbox" id="rm-data"> Delete its data too</label>
+    <div id="rm-confirm" hidden><label class="f" for="rm-name">Type <b>${esc(x.name)}</b> to confirm</label><input type="text" id="rm-name"></div>
+    <div class="row"><span class="msg" id="modal-msg"></span><button class="ghost" id="modal-cancel">Cancel</button><button class="danger" id="modal-go">Remove</button></div>`;
+  $('modal').classList.add('on');
+  const close = () => $('modal').classList.remove('on');
+  $('rm-data').onchange = () => { $('rm-confirm').hidden = !$('rm-data').checked; };
+  $('modal-cancel').onclick = close;
+  $('modal-go').onclick = async () => {
+    const del = $('rm-data').checked;
+    if (del && $('rm-name').value.trim() !== x.name) { flash('modal-msg', 'Type its name to delete its data.', false); return; }
+    $('modal-go').disabled = true;
+    try { const r = await api(`/api/admin/hosting/${x.id}${del ? '?delete_data=1' : ''}`, { method: 'DELETE' });
+      close(); toast(r.data_deleted ? `${x.name} and its data were removed` : `${x.name} was removed (its data is still in ${r.data_dir})`); loadHosting(); }
+    catch (e) { flash('modal-msg', e.message, false); $('modal-go').disabled = false; }
+  };
+}
+$('host-add').onclick = async () => {
+  const name = $('host-name').value.trim(), port = parseInt($('host-port').value, 10);
+  if (!name) { flash('host-msg', 'Give it a name.', false); return; }
+  $('host-add').disabled = true;
+  try { await api('/api/admin/hosting', { json: { name, port } }); $('host-name').value = ''; $('host-port').value = '';
+    flash('host-msg', `Started ${name} on port ${port}.`); loadHosting(); }
+  catch (e) { flash('host-msg', e.message, false); }
+  finally { $('host-add').disabled = false; }
+};
 
 // ── Confirm dialog ───────────────────────────────────────────────────
 function confirmBox(title, text, action, run, withReason = false) {

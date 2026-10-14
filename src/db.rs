@@ -183,6 +183,9 @@ pub async fn init() -> Result<SqlitePool, sqlx::Error> {
         // Server nickname: what this member is called on this server only
         // ('' = none — their global nickname, or else their username, shows).
         "ALTER TABLE users    ADD COLUMN nickname    TEXT NOT NULL DEFAULT ''",
+        // Imported history (imports.rs): whose it originally was,
+        // "discord:<their id>" (NULL = written here).
+        "ALTER TABLE messages ADD COLUMN imported_from TEXT",
     ];
     for sql in migrations {
         let _ = sqlx::query(sql).execute(&pool).await;

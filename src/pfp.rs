@@ -179,7 +179,15 @@ pub async fn serve_pfp(
         return StatusCode::UNAUTHORIZED.into_response();
     }
     let Some(key) = storage_key_for(&s.pool, &username).await else {
-        return StatusCode::NOT_FOUND.into_response();
+        // Not a member: an imported (Discord) one's picture, if there's one.
+        return match crate::imports::placeholder_avatar(&s.pool, &username).await {
+            Some(data) => Response::builder()
+                .status(StatusCode::OK)
+                .header(header::CONTENT_TYPE, image_mime(&data).unwrap_or("application/octet-stream"))
+                .body(Body::from(data))
+                .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response()),
+            None => StatusCode::NOT_FOUND.into_response(),
+        };
     };
     let path = pfps_dir().join(format!("{key}.png"));
     match std::fs::read(&path) {

@@ -8,6 +8,8 @@ mod db;
 mod emojis;
 mod stickers;
 mod files;
+mod hosting;
+mod imports;
 mod messages;
 mod pfp;
 mod profile;
@@ -37,10 +39,10 @@ const USAGE: &str = "\
 chriscord-server — self-hosted chat server
 
 USAGE:
-    chriscord-server [--data-dir DIR] [COMMAND]
+    chriscord-server [--data-dir DIR] [--port PORT] [COMMAND]
 
 COMMANDS:
-    (none)             Run the server (port 7070, TCP + UDP)
+    (none)             Run the server (port 7070 unless --port, TCP + UDP)
     owner-key          Print the owner key (for the admin panel) and exit
     reset-owner-key    Make a new owner key, print it, and exit — the old one
                        stops working once the server restarts
@@ -52,6 +54,11 @@ DATA DIRECTORY:
     the current directory. The systemd unit uses /var/lib/chriscord.
 
     sudo -u chriscord chriscord-server --data-dir /var/lib/chriscord owner-key
+
+PORT:
+    --port PORT, or CHRISCORD_PORT, else 7070. Used for both chat (TCP) and
+    voice (UDP). More servers on the same machine: see Hosted servers in
+    the admin panel.
 ";
 
 /// Moves into the data directory (everything the server stores uses paths
@@ -59,13 +66,21 @@ DATA DIRECTORY:
 fn parse_args() -> Option<String> {
     let mut args = std::env::args().skip(1);
     let mut data_dir = std::env::var("CHRISCORD_DATA_DIR").ok().filter(|d| !d.is_empty());
+    let mut port = std::env::var("CHRISCORD_PORT").ok().filter(|p| !p.is_empty());
     let mut command = None;
     while let Some(a) = args.next() {
         match a.as_str() {
             "--data-dir" => data_dir = Some(args.next().unwrap_or_else(|| { eprintln!("--data-dir needs a directory"); std::process::exit(2) })),
+            "--port" => port = Some(args.next().unwrap_or_else(|| { eprintln!("--port needs a number"); std::process::exit(2) })),
             "-h" | "--help" | "help" => { print!("{USAGE}"); std::process::exit(0) }
             c if command.is_none() && !c.starts_with('-') => command = Some(c.to_string()),
             other => { eprintln!("Unknown argument: {other}\n\n{USAGE}"); std::process::exit(2) }
+        }
+    }
+    if let Some(p) = port {
+        match p.trim().parse::<u16>() {
+            Ok(n) if n > 0 => utils::set_port(n),
+            _ => { eprintln!("Not a port number: {p}"); std::process::exit(2) }
         }
     }
     if let Some(dir) = data_dir {
@@ -118,6 +133,8 @@ async fn main() {
     emojis::init(&pool).await.expect("Failed to set up custom emoji");
     stickers::init(&pool).await.expect("Failed to set up stickers");
     channel_keys::init(&pool).await.expect("Failed to set up message encryption keys");
+    imports::init(&pool).await.expect("Failed to set up imported history");
+    hosting::init(&pool).await.expect("Failed to set up hosted servers");
     zips::clear_leftovers(); // "Download all" zips from before a restart
 
     let owner_key =
@@ -142,8 +159,10 @@ async fn main() {
         voice_runtime: voice::VoiceRuntime::new().await,
         file_links: Mutex::new(HashMap::new()),
         zips: zips::Zips::new(),
+        hosting: hosting::Hosting::new(),
     });
     let state_for_shutdown = state.clone();
+    let port = utils::port();
 
     if interactive {
         println!();
@@ -151,8 +170,8 @@ async fn main() {
         println!("  ║         C H R I S C O R D                ║");
         println!("  ╠══════════════════════════════════════════╣");
         println!("  ║  Owner key : {}  ║", &owner_key);
-        println!("  ║  Admin UI  : http://0.0.0.0:7070/admin   ║");
-        println!("  ║  Port      : 7070 (TCP + UDP)             ║");
+        println!("  ║  Admin UI  : {:<28}║", format!("http://0.0.0.0:{port}/admin"));
+        println!("  ║  Port      : {:<28}║", format!("{port} (TCP + UDP)"));
         println!("  ╚══════════════════════════════════════════╝");
         println!();
     } else {
@@ -237,13 +256,34 @@ async fn main() {
         .route("/api/banner/:username",  get(profile::serve_banner))
         .route("/api/preview",          get(preview::get_preview))
         .route("/ws",                   get(ws::ws_handler))
+        // Importing history (imports.rs) and claiming it.
+        .route("/api/admin/import/session",  post(imports::session))
+        .route("/api/admin/import/authors",  post(imports::authors)
+            .layer(DefaultBodyLimit::max(256 << 20))) // carries profile pictures
+        .route("/api/admin/import/existing", post(imports::existing))
+        .route("/api/admin/import/messages", post(imports::messages)
+            .layer(DefaultBodyLimit::max(64 << 20)))
+        .route("/api/admin/imported",        get(imports::admin_list))
+        .route("/api/admin/imported/:source/:id/link",   post(imports::admin_link))
+        .route("/api/admin/imported/:source/:id/unlink", post(imports::admin_unlink))
+        .route("/api/admin/imported/:source/:id/requests/:public_key", delete(imports::admin_deny))
+        .route("/api/claims",                post(imports::request_claim))
+        // More servers on this machine (hosting.rs).
+        .route("/api/admin/hosting",         get(hosting::list).post(hosting::create))
+        .route("/api/admin/hosting/:id",     patch(hosting::rename).delete(hosting::remove))
+        .route("/api/admin/hosting/:id/start",   post(hosting::start))
+        .route("/api/admin/hosting/:id/stop",    post(hosting::stop))
+        .route("/api/admin/hosting/:id/restart", post(hosting::restart))
+        .route("/api/admin/hosting/:id/owner-key", get(hosting::owner_key))
         .layer(CorsLayer::permissive())
         .with_state(state);
 
-    let listener = tokio::net::TcpListener::bind("0.0.0.0:7070")
-        .await.expect("Failed to bind port 7070");
+    let listener = tokio::net::TcpListener::bind(("0.0.0.0", port))
+        .await.unwrap_or_else(|e| panic!("Failed to bind port {port}: {e}"));
 
-    tracing::info!("chriscord-server listening on 0.0.0.0:7070");
+    tracing::info!("chriscord-server listening on 0.0.0.0:{port}");
+    // Any other servers this one hosts.
+    hosting::start_all(&state_for_shutdown).await;
 
     // Stop cleanly on Ctrl+C or SIGTERM (`systemctl stop/restart`): tell the
     // apps it's a restart (they reconnect on their own, and rejoin calls),
@@ -256,6 +296,7 @@ async fn main() {
             tracing::info!("shutting down");
             let _ = shutdown_state.tx.send(serde_json::json!({ "type": "server_restarting" }).to_string());
             tokio::time::sleep(std::time::Duration::from_millis(300)).await; // let that notice go out
+            shutdown_state.hosting.stop_all().await; // servers this one hosts stop with it
             shutdown_state.pool.close().await;
         }
     }

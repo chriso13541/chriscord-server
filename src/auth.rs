@@ -221,6 +221,9 @@ pub async fn join(
 
     // Register on first use
     if existing_user.is_empty() {
+        // An imported (Discord) member going by this name gets another one,
+        // so nobody takes the newcomer for them (imports.rs).
+        crate::imports::make_way_for(&s, &username).await;
         let now = chrono::Utc::now().to_rfc3339();
         sqlx::query(
             "INSERT INTO users (public_key, username, created_at) VALUES (?, ?, ?)",

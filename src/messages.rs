@@ -86,6 +86,11 @@ pub struct ChatMessage {
     /// "<username> joined the server."
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kind:        Option<String>,
+    /// Imported history (imports.rs): whose it originally was, e.g.
+    /// "discord:<their Discord id>". The app checks it against who the
+    /// encrypted message says wrote it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub imported_from: Option<String>,
 }
 
 /// What a reply shows of the message it answers.
@@ -100,6 +105,9 @@ pub struct ReplyPreview {
     /// It has since been deleted.
     #[serde(default)]
     pub deleted:     bool,
+    /// Imported history: whose it originally was (see ChatMessage).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub imported_from: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -109,7 +117,13 @@ pub struct Reaction {
     /// Who reacted, in order — lets clients show "you reacted" and a
     /// hover list of names without another request.
     pub users: Vec<String>,
+    /// Reactions brought over with imported history, whose names weren't
+    /// known (they're part of count, but not of users).
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub imported: usize,
 }
+
+fn is_zero(n: &usize) -> bool { *n == 0 }
 
 /// A ChatMessage plus which board (and its room) it came from — only
 /// meaningful once search spans every channel instead of being scoped to
@@ -185,6 +199,7 @@ pub fn row_to_msg(r: &sqlx::sqlite::SqliteRow) -> ChatMessage {
         reply_to:    r.try_get::<Option<String>, _>("reply_to").ok().flatten(),
         reply:       None,       // filled in by attach_replies
         kind:        r.try_get::<Option<String>, _>("kind").ok().flatten().filter(|k| !k.is_empty()),
+        imported_from: r.try_get::<Option<String>, _>("imported_from").ok().flatten(),
     }
 }
 
@@ -212,14 +227,14 @@ pub async fn post_join_message(s: &AppState, username: &str) {
         .bind(&id).bind(&board_id).bind(username).bind(&now).execute(&s.pool).await.is_ok();
     if !ok { return; }
     let msg = ChatMessage { id, board_id, username: username.to_string(), content: String::new(), attachments: vec![], edited: false,
-        created_at: now, pinned: false, reactions: vec![], reply_to: None, reply: None, kind: Some("join".into()) };
+        created_at: now, pinned: false, reactions: vec![], reply_to: None, reply: None, kind: Some("join".into()), imported_from: None };
     let _ = s.tx.send(serde_json::json!({ "type": "message", "data": msg }).to_string());
 }
 
 const SELECT: &str =
     "SELECT id, board_id, username, content,
             attachment_url, attachment_name, attachment_mime,
-            attachments, edited, created_at, pinned_at, reply_to, kind
+            attachments, edited, created_at, pinned_at, reply_to, kind, imported_from
      FROM messages";
 
 // Same columns as SELECT above, plus the joined board's name and room —
@@ -227,7 +242,7 @@ const SELECT: &str =
 const SEARCH_SELECT: &str =
     "SELECT m.id, m.board_id, m.username, m.content,
             m.attachment_url, m.attachment_name, m.attachment_mime,
-            m.attachments, m.edited, m.created_at, m.pinned_at, m.reply_to, m.kind,
+            m.attachments, m.edited, m.created_at, m.pinned_at, m.reply_to, m.kind, m.imported_from,
             b.name AS board_name, b.room_id AS room_id
      FROM messages m JOIN boards b ON m.board_id = b.id";
 
@@ -614,7 +629,7 @@ pub async fn post_message(
     if reply_to.is_some() {
         let _ = sqlx::query("UPDATE messages SET reply_to = ? WHERE id = ?").bind(&reply_to).bind(&id).execute(&s.pool).await;
     }
-    let mut msg = ChatMessage { id, board_id, username, content, attachments, edited: false, created_at: now, pinned: false, reactions: Vec::new(), reply_to, reply: None, kind: None };
+    let mut msg = ChatMessage { id, board_id, username, content, attachments, edited: false, created_at: now, pinned: false, reactions: Vec::new(), reply_to, reply: None, kind: None, imported_from: None };
     attach_replies(&s.pool, std::slice::from_mut(&mut msg)).await;
     let _ = s.tx.send(serde_json::json!({ "type": "message", "data": msg }).to_string());
     Ok(Json(msg))
@@ -679,6 +694,7 @@ pub async fn delete_message(
 
     sqlx::query("DELETE FROM messages WHERE id = ?").bind(&id).execute(&s.pool).await.map_err(|_| db_err())?;
     let _ = sqlx::query("DELETE FROM reactions WHERE message_id = ?").bind(&id).execute(&s.pool).await;
+    let _ = sqlx::query("DELETE FROM imported_reactions WHERE message_id = ?").bind(&id).execute(&s.pool).await;
 
     let _ = s.tx.send(serde_json::json!({
         "type": "message_delete", "id": id, "board_id": board_id,
@@ -789,7 +805,7 @@ pub async fn attach_replies(pool: &sqlx::SqlitePool, msgs: &mut [ChatMessage]) {
         return;
     }
     let sql = format!(
-        "SELECT id, username, content, attachments, attachment_url FROM messages WHERE id IN ({})",
+        "SELECT id, username, content, attachments, attachment_url, imported_from FROM messages WHERE id IN ({})",
         vec!["?"; ids.len()].join(","),
     );
     let mut q = sqlx::query(&sql);
@@ -807,12 +823,14 @@ pub async fn attach_replies(pool: &sqlx::SqlitePool, msgs: &mut [ChatMessage]) {
             // couldn't be decrypted (the app shortens it once it has).
             content: if content.starts_with("e2ee:") { content } else { content.chars().take(200).collect() },
             attachments: files, deleted: false,
+            imported_from: r.try_get::<Option<String>, _>("imported_from").ok().flatten(),
         })
     }).collect();
     for m in msgs.iter_mut() {
         if let Some(target) = &m.reply_to {
             m.reply = Some(found.get(target).cloned().unwrap_or(ReplyPreview {
                 id: target.clone(), username: String::new(), content: String::new(), attachments: 0, deleted: true,
+                imported_from: None,
             }));
         }
     }
@@ -836,14 +854,21 @@ pub async fn attach_reactions(pool: &sqlx::SqlitePool, msgs: &mut [ChatMessage])
         Ok(r) => r,
         Err(e) => { tracing::warn!("reactions: load failed: {e}"); return; }
     };
-    let mut by_msg: std::collections::HashMap<String, Vec<Reaction>> = std::collections::HashMap::new();
+    // Imported reactions (counts without names) come first: they're older.
+    let ids: Vec<String> = msgs.iter().map(|m| m.id.clone()).collect();
+    let mut by_msg: std::collections::HashMap<String, Vec<Reaction>> = crate::imports::imported_reactions(pool, &ids).await
+        .into_iter()
+        .map(|(id, list)| (id, list.into_iter().map(|(emoji, n)| Reaction {
+            emoji, count: n.max(0) as usize, users: Vec::new(), imported: n.max(0) as usize,
+        }).collect::<Vec<Reaction>>()))
+        .collect();
     for r in &rows {
         let list = by_msg.entry(r.get("message_id")).or_default();
         let emoji: String = r.get("emoji");
         let user: String = r.get("username");
         match list.iter_mut().find(|x| x.emoji == emoji) {
             Some(x) => { x.count += 1; x.users.push(user); }
-            None => list.push(Reaction { emoji, count: 1, users: vec![user] }),
+            None => list.push(Reaction { emoji, count: 1, users: vec![user], imported: 0 }),
         }
     }
     for m in msgs.iter_mut() {

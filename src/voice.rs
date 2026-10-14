@@ -4,9 +4,9 @@
 // course of development, with mute, deafen, and real two-way audio
 // between separate machines all confirmed working — it's no longer a
 // first draft. Worth knowing about the UDP networking setup specifically:
-// all voice traffic now runs over ONE muxed UDP port (ICE_UDP_PORT, the
+// all voice traffic now runs over ONE muxed UDP port (ice_udp_port, the
 // same number as the HTTP/WebSocket port, so the router only needs 7070
-// forwarded as TCP+UDP). See ICE_UDP_PORT's own comment for why earlier
+// forwarded as TCP+UDP). See ice_udp_port's own comment for why earlier
 // single-port attempts failed and what makes this one work.
 //
 // Design — each participant's offer declares its own real shape upfront:
@@ -289,7 +289,9 @@ fn reapply_deafen_soon(state: &Arc<AppState>, key: &ParticipantKey) {
 /// from the same socket — so the router's port-forward mapping carries
 /// the replies back out. Without CHRISCORD_PUBLIC_IP, only LAN clients can
 /// connect: a remote client is only ever told the private LAN address.
-const ICE_UDP_PORT: u16 = 7070;
+/// It's the server's own port: 7070 unless --port (or CHRISCORD_PORT) says
+/// otherwise, which is how several servers share one machine (hosting.rs).
+fn ice_udp_port() -> u16 { crate::utils::port() }
 
 /// The server's public IPv4 address, from CHRISCORD_PUBLIC_IP (read once).
 fn public_ip() -> Option<&'static str> {
@@ -445,18 +447,18 @@ impl VoiceRuntime {
         let mut registry = Registry::new();
         registry = register_default_interceptors(registry, &mut media_engine)
             .expect("register default interceptors");
-        let socket = UdpSocket::bind(("0.0.0.0", ICE_UDP_PORT))
+        let socket = UdpSocket::bind(("0.0.0.0", ice_udp_port()))
             .await
             .expect("failed to bind voice UDP port — is something else already using it?");
-        tracing::info!("voice: all voice traffic muxed over UDP port {ICE_UDP_PORT}");
+        tracing::info!("voice: all voice traffic muxed over UDP port {}", ice_udp_port());
         let udp_mux = UDPMuxDefault::new(UDPMuxParams::new(socket));
         let mut setting_engine = SettingEngine::default();
         setting_engine.set_udp_network(UDPNetwork::Muxed(udp_mux));
         // IPv4 only — this is what stops IPv6 addresses on the real
         // interface from adding extra candidates (and extra readers) on the
-        // shared socket. See ICE_UDP_PORT's comment.
+        // shared socket. See ice_udp_port's comment.
         setting_engine.set_network_types(vec![NetworkType::Udp4]);
-        // Never gather loopback (see ICE_UDP_PORT). Optionally pin the
+        // Never gather loopback (see ice_udp_port). Optionally pin the
         // single exact IP to gather from, e.g. CHRISCORD_ICE_IP=192.168.1.50
         // — useful if the chosen interface has more than one IPv4 address.
         let wanted: Option<std::net::IpAddr> = std::env::var("CHRISCORD_ICE_IP").ok().map(|ip| {
@@ -469,10 +471,10 @@ impl VoiceRuntime {
             !addr.is_loopback() && wanted.map_or(true, |w| addr == w)
         }));
         // Clients outside the LAN get the public IP as an extra candidate
-        // (see ICE_UDP_PORT). e.g. CHRISCORD_PUBLIC_IP=203.0.113.7
+        // (see ice_udp_port). e.g. CHRISCORD_PUBLIC_IP=203.0.113.7
         match (public_ip(), std::env::var("CHRISCORD_PUBLIC_IP")) {
             (Some(ip), _) => tracing::info!(
-                "voice: CHRISCORD_PUBLIC_IP={ip} — advertising it alongside the LAN address (forward UDP {ICE_UDP_PORT} to this machine)"
+                "voice: CHRISCORD_PUBLIC_IP={ip} — advertising it alongside the LAN address (forward UDP {} to this machine)", ice_udp_port()
             ),
             (None, Ok(bad)) if !bad.trim().is_empty() => tracing::warn!(
                 "voice: CHRISCORD_PUBLIC_IP={bad:?} is not an IPv4 address — ignoring it; only LAN clients can connect to voice"
@@ -605,7 +607,7 @@ pub async fn handle_offer(
         // Note: with the muxed UDP port, webrtc-ice 0.11 skips STUN
         // gathering entirely, so these servers are currently unused — the
         // public address comes from CHRISCORD_PUBLIC_IP instead (see
-        // ICE_UDP_PORT). Kept so switching back to an ephemeral port range
+        // ice_udp_port). Kept so switching back to an ephemeral port range
         // wouldn't also need this restored.
         ice_servers: vec![
             RTCIceServer {
@@ -772,7 +774,7 @@ pub async fn handle_offer(
                 }
             };
             // The public-IP twin of a LAN candidate, for clients outside the
-            // LAN (see ICE_UDP_PORT) — sent right after the original.
+            // LAN (see ice_udp_port) — sent right after the original.
             let public_copy = public_ip().and_then(|ip| public_candidate_copy(&init.candidate, ip));
             for candidate in std::iter::once(init.candidate.clone()).chain(public_copy) {
                 crate::ws::send_to_user(

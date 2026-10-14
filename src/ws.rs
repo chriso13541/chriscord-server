@@ -742,6 +742,9 @@ async fn handle_socket(socket: WebSocket, token: String, initial_status: Option<
                                 // keys others need and retries messages it couldn't open. Only for
                                 // channels this member can see (or none named).
                                 Some("e2ee_changed") => v["board_id"].as_str().map_or(true, |b| sees(&visible, b)),
+                                // Imported history added or claimed (imports.rs): the app loads
+                                // the channel again if it's showing it.
+                                Some("history_changed") => v["board_id"].as_str().map_or(true, |b| sees(&visible, b)),
                                 Some("action_denied") => v["target"].as_str() == Some(username.as_str()),
                                 // Speaking rings are only for people in that same call —
                                 // someone just browsing the server still gets voice_state
@@ -1052,7 +1055,7 @@ async fn load_history(state: &Arc<AppState>, board_id: &str) -> Vec<serde_json::
     let mut rows = match sqlx::query(
         "SELECT id, board_id, username, content,
                 attachment_url, attachment_name, attachment_mime,
-                attachments, edited, created_at, pinned_at, reply_to, kind
+                attachments, edited, created_at, pinned_at, reply_to, kind, imported_from
          FROM messages WHERE board_id = ? ORDER BY id DESC LIMIT ?",
     ).bind(board_id).bind(HISTORY_PAGE).fetch_all(&state.pool).await {
         Ok(r) => r,
@@ -1091,7 +1094,7 @@ async fn save_and_broadcast(
     let mut msg = crate::messages::ChatMessage {
         id, board_id: board_id.to_string(), username: username.to_string(),
         content: content.to_string(), attachments, edited: false, created_at: now, pinned: false, reactions: Vec::new(),
-        reply_to, reply: None, kind: None,
+        reply_to, reply: None, kind: None, imported_from: None,
     };
     crate::messages::attach_replies(&state.pool, std::slice::from_mut(&mut msg)).await;
     let _ = state.tx.send(serde_json::json!({ "type": "message", "data": msg }).to_string());

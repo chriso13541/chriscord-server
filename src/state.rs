@@ -50,4 +50,6 @@ pub struct AppState {
     pub file_links: Mutex<HashMap<String, (String, Instant)>>,
     /// "Download all" zips and their links (see zips.rs).
     pub zips: crate::zips::Zips,
+    /// Other servers this one runs on the same machine (hosting.rs).
+    pub hosting: crate::hosting::Hosting,
 }

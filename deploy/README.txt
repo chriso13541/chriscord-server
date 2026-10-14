@@ -70,3 +70,30 @@ Back up `/var/lib/chriscord`. For the database, while the server is running:
 ```sh
 sudo -u chriscord sqlite3 /var/lib/chriscord/chriscord.db ".backup '/var/lib/chriscord/backup.db'"
 ```
+
+## More servers on the same machine
+
+The admin panel's **Hosted servers** page runs other Chriscord servers from this
+one — each completely separate (its own members, channels, owner key and admin
+panel), each on its own port. Pick a name and a port, and it's created and
+started; it starts and stops with this service from then on, and is restarted if
+it ever stops by itself.
+
+* Forward each hosted server's port as **TCP + UDP**, like 7070 (chat and voice
+  share it), or point a domain at it with your reverse proxy. People add it in
+  the app as `your-address:port`.
+* Its data lives in `/var/lib/chriscord/servers/<id>/` (shown in the panel) — so
+  backing up `/var/lib/chriscord` covers them too.
+* *Owner key* copies its owner key; *Admin panel* opens its own panel.
+* *Remove* stops it and takes it off the list, keeping its data unless you tick
+  *Delete its data too*.
+
+You can also run a separate server by hand with `--port`:
+`chriscord-server --data-dir /some/dir --port 7071`.
+
+## Importing a Discord server
+
+`chriscord-import` (its own folder/repo) brings DiscordChatExporter HTML exports
+in, end-to-end encrypted. The people it imports show up in the admin panel under
+**Imported members**, where you approve members' claims ("This is me" in the app)
+or link them yourself. See chriscord-import's README.
