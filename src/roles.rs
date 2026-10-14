@@ -63,12 +63,16 @@ pub const DEAFEN_MEMBERS: u64 = 1 << 20;
 pub const MOVE_MEMBERS: u64 = 1 << 21;
 /// Rearrange channels and categories (order, and which category a channel is in).
 pub const MANAGE_CHANNELS: u64 = 1 << 22;
-pub const ALL: u64 = (1 << 23) - 1;
+/// Hear others in voice channels. Without it, the server doesn't send them
+/// anyone's voice (like being server-deafened) — e.g. for a bot that should
+/// only talk.
+pub const LISTEN: u64 = 1 << 23;
+pub const ALL: u64 = (1 << 24) - 1;
 
 /// What @everyone can do on a new server — what everyone could do before
 /// roles existed.
 pub const DEFAULT_PERMISSIONS: u64 = SEND_MESSAGES | ATTACH_FILES | ADD_REACTIONS | CONNECT | PIN_MESSAGES
-    | VIEW_CHANNELS | READ_HISTORY | CREATE_INVITE | CHANGE_NICKNAME | EMBED_LINKS | SPEAK | VIDEO;
+    | VIEW_CHANNELS | READ_HISTORY | CREATE_INVITE | CHANGE_NICKNAME | EMBED_LINKS | SPEAK | VIDEO | LISTEN;
 
 /// Permissions added after servers already existed, that everyone had in
 /// effect before (there was no way to stop them): given to @everyone once,
@@ -97,6 +101,7 @@ fn catalog() -> serde_json::Value {
         { "bit": PIN_MESSAGES, "group": "Text", "name": "Pin Messages", "about": "Pin and unpin messages in a channel." },
         { "bit": MANAGE_MESSAGES, "group": "Text", "name": "Manage Messages", "about": "Delete other people's messages (and pin/unpin)." },
         { "bit": CONNECT, "group": "Voice", "name": "Connect", "about": "Join voice channels." },
+        { "bit": LISTEN, "group": "Voice", "name": "Listen", "about": "Hear others in voice channels. Without it, the server sends them no one's voice — for a bot that should only talk, say." },
         { "bit": SPEAK, "group": "Voice", "name": "Speak", "about": "Be heard in voice channels. Without it, the server doesn't pass their microphone on." },
         { "bit": VIDEO, "group": "Voice", "name": "Video", "about": "Turn on their camera or share their screen in voice channels." },
         { "bit": MUTE_MEMBERS, "group": "Voice", "name": "Mute Members", "about": "Server-mute members with a lower role, so nobody hears them." },
@@ -143,6 +148,12 @@ pub async fn init(pool: &SqlitePool) -> Result<(), sqlx::Error> {
         sqlx::query("UPDATE roles SET permissions = permissions | ? WHERE (permissions & ?) != 0")
             .bind(CREATE_EXPRESSIONS as i64).bind(MANAGE_EMOJIS as i64).execute(pool).await?;
         db::set_config(pool, "permissions_v2", "1").await?;
+    }
+    // Listen came later: everyone could hear before it existed.
+    if db::get_config(pool, "permissions_v3").await?.is_none() {
+        sqlx::query("UPDATE roles SET permissions = permissions | ? WHERE is_default = 1")
+            .bind(LISTEN as i64).execute(pool).await?;
+        db::set_config(pool, "permissions_v3", "1").await?;
     }
     Ok(())
 }
@@ -232,10 +243,10 @@ pub async fn get_roles(headers: HeaderMap, State(s): State<Arc<AppState>>) -> Re
     let (roles, members) = roles_json(&s.pool).await.map_err(|_| dberr())?;
     Ok(Json(serde_json::json!({
         "roles": roles, "members": members, "my_permissions": permissions_of(&s.pool, &username).await,
-        // 2: the permissions list from View Channels (2048) up exists and is
-        // enforced. Older servers leave this out, and apps treat those
-        // permissions as allowed there.
-        "permissions_version": 2,
+        // 2: the permissions from View Channels (2048) up exist and are
+        // enforced; 3: Listen too. Older servers leave this out, and apps
+        // treat the permissions those servers don't have as allowed there.
+        "permissions_version": 3,
     })))
 }
 

@@ -912,6 +912,8 @@ async fn update_voice_blocks(state: &Arc<AppState>, username: &str) {
     let mut bits = 0u8;
     if perms & crate::roles::SPEAK == 0 || muted { bits |= voice::BLOCK_AUDIO; }
     if perms & crate::roles::VIDEO == 0 { bits |= voice::BLOCK_VIDEO; }
+    // Listen: whether anyone's voice is sent to them.
+    let listen_changed = voice::set_can_listen(state, username, perms & crate::roles::LISTEN != 0).await;
     let before = voice::blocked(username);
     voice::set_blocked(username, bits);
     if bits & voice::BLOCK_VIDEO != 0 {
@@ -931,7 +933,7 @@ async fn update_voice_blocks(state: &Arc<AppState>, username: &str) {
             broadcast_voice_state(state);
         }
     }
-    if before != bits { broadcast_voice_state(state); }
+    if before != bits || listen_changed { broadcast_voice_state(state); }
 }
 /// True if this connection may act on the account's call: it's the owner,
 /// or nobody owns it right now.
@@ -983,7 +985,9 @@ fn broadcast_voice_state(state: &Arc<AppState>) {
     // who's server-deafened — only people in a call.
     let (server_muted, server_deafened): (Vec<String>, Vec<String>) = {
         let voice = state.voice.lock().unwrap();
-        let deaf = voice::server_deafened();
+        let mut deaf = voice::server_deafened();
+        let no_listen: Vec<String> = voice.keys().filter(|u| voice::cannot_listen(u.as_str()) && !deaf.contains(*u)).cloned().collect();
+        deaf.extend(no_listen);
         (
             voice.keys().filter(|u| voice::blocked(u) & voice::BLOCK_AUDIO != 0).cloned().collect(),
             deaf.into_iter().filter(|u| voice.contains_key(u)).collect(),

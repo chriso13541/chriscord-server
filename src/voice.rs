@@ -140,6 +140,39 @@ pub fn is_server_deafened(username: &str) -> bool {
     deafened_set().lock().unwrap().contains(username)
 }
 
+/// People whose roles don't allow Listen: sent no one's voice, the same way
+/// as server-deafened, but kept apart so lifting a server deafen doesn't
+/// let them hear (and gaining Listen doesn't lift a deafen).
+fn no_listen_set() -> &'static std::sync::Mutex<HashSet<String>> {
+    static N: std::sync::OnceLock<std::sync::Mutex<HashSet<String>>> = std::sync::OnceLock::new();
+    N.get_or_init(|| std::sync::Mutex::new(HashSet::new()))
+}
+
+pub fn cannot_listen(username: &str) -> bool {
+    no_listen_set().lock().unwrap().contains(username)
+}
+
+/// Whether voices are held back from them, for either reason.
+fn hears_nobody(username: &str) -> bool {
+    is_server_deafened(username) || cannot_listen(username)
+}
+
+/// Sets whether someone may hear others (their Listen permission), and
+/// applies it to the call they're in. Returns whether it changed.
+pub async fn set_can_listen(state: &Arc<AppState>, username: &str, can: bool) -> bool {
+    let changed = {
+        let mut n = no_listen_set().lock().unwrap();
+        if can { n.remove(username) } else { n.insert(username.to_string()) }
+    };
+    if changed {
+        let board = { state.voice.lock().unwrap().get(username).cloned() };
+        if let Some(board) = board {
+            apply_deafen(state, &(board, username.to_string())).await;
+        }
+    }
+    changed
+}
+
 /// Everyone server-deafened right now (for voice_state).
 pub fn server_deafened() -> Vec<String> {
     deafened_set().lock().unwrap().iter().cloned().collect()
@@ -170,7 +203,7 @@ pub async fn set_server_deafened(state: &Arc<AppState>, username: &str, on: bool
 /// them when they're not. (Pausing and resuming the same source is what
 /// replace_track does reliably here — see forget_screen_slots.)
 async fn apply_deafen(state: &Arc<AppState>, key: &ParticipantKey) {
-    if is_server_deafened(&key.1) {
+    if hears_nobody(&key.1) {
         let pc = { state.voice_runtime.connections.lock().await.get(key).cloned() };
         let Some(pc) = pc else { return };
         let mut paused: Vec<(Arc<RTCRtpTransceiver>, String)> = Vec::new();
@@ -186,7 +219,7 @@ async fn apply_deafen(state: &Arc<AppState>, key: &ParticipantKey) {
             }
         }
         if !paused.is_empty() {
-            tracing::info!("voice: {} is server-deafened — {} voice(s) paused", key.1, paused.len());
+            tracing::info!("voice: {} hears no one (server-deafened or no Listen) — {} voice(s) paused", key.1, paused.len());
             paused_voices().lock().unwrap().entry(key.clone()).or_default().extend(paused);
         }
     } else {
@@ -202,14 +235,14 @@ async fn apply_deafen(state: &Arc<AppState>, key: &ParticipantKey) {
             let track_dyn: Arc<dyn TrackLocal + Send + Sync> = track as _;
             let _ = sender.replace_track(Some(track_dyn)).await;
         }
-        tracing::info!("voice: {} is no longer server-deafened", key.1);
+        tracing::info!("voice: {} can hear again", key.1);
     }
 }
 
 /// apply_deafen a moment from now — for a connection that's just been
 /// (re)negotiated, once its new voice sections are in use.
 fn reapply_deafen_soon(state: &Arc<AppState>, key: &ParticipantKey) {
-    if !is_server_deafened(&key.1) { return; }
+    if !hears_nobody(&key.1) { return; }
     let state = Arc::clone(state);
     let key = key.clone();
     tokio::spawn(async move {
