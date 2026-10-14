@@ -51,7 +51,7 @@ pub async fn next_board_position(pool: &SqlitePool, room_id: &str) -> i64 {
         .fetch_one(pool).await.map(|r| r.get::<i64, _>("p")).unwrap_or(0)
 }
 
-/// The crowned owner (by session) or the admin panel (by owner key).
+/// A member with Manage Channels (by session) or the admin panel (by owner key).
 async fn require_owner(h: &HeaderMap, s: &AppState) -> Result<(), ApiErr> {
     if crate::admin::check_owner(h, s).is_ok() {
         return Ok(());
@@ -59,9 +59,11 @@ async fn require_owner(h: &HeaderMap, s: &AppState) -> Result<(), ApiErr> {
     let token = h.get("X-Session-Token").and_then(|v| v.to_str().ok()).unwrap_or("");
     let user = db::verify_token(&s.pool, token).await.map_err(|_| dberr())?
         .ok_or_else(|| err(StatusCode::UNAUTHORIZED, "Unauthorized"))?;
-    match crate::admin::owner_username(&s.pool).await {
-        Some(owner) if owner == user => Ok(()),
-        _ => Err(err(StatusCode::FORBIDDEN, "Only the server owner can rearrange channels")),
+    // The owner has every permission, so this covers them too.
+    if crate::roles::has(&s.pool, &user, crate::roles::MANAGE_CHANNELS).await {
+        Ok(())
+    } else {
+        Err(err(StatusCode::FORBIDDEN, "You don't have permission to rearrange channels on this server"))
     }
 }
 

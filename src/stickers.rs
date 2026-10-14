@@ -88,6 +88,20 @@ async fn manager(h: &HeaderMap, s: &AppState) -> Result<String, ApiErr> {
     Ok(user)
 }
 
+/// Who's uploading: the owner key, or a member with Create Expressions (or
+/// Manage Expressions, which includes it).
+async fn uploader(h: &HeaderMap, s: &AppState) -> Result<String, ApiErr> {
+    if crate::admin::check_owner(h, s).is_ok() {
+        return Ok(String::new());
+    }
+    let user = member(h, s).await?;
+    let perms = roles::permissions_of(&s.pool, &user).await;
+    if perms & (roles::CREATE_EXPRESSIONS | roles::MANAGE_EMOJIS) == 0 {
+        return Err(err(StatusCode::FORBIDDEN, "You don't have permission to upload stickers on this server"));
+    }
+    Ok(user)
+}
+
 fn row_json(r: &sqlx::sqlite::SqliteRow) -> serde_json::Value {
     serde_json::json!({
         "id": r.get::<String, _>("id"),
@@ -149,7 +163,7 @@ pub async fn upload(
     State(s): State<Arc<AppState>>,
     body: Bytes,
 ) -> Result<Json<serde_json::Value>, ApiErr> {
-    let by = manager(&headers, &s).await?;
+    let by = uploader(&headers, &s).await?;
     let name = q.name.trim();
     if !valid_name(name) {
         return Err(bad("Sticker names are 2–30 characters, without < > or :"));

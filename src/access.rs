@@ -59,17 +59,25 @@ pub async fn visible_for(pool: &SqlitePool, username: &str) -> Option<Visible> {
     for r in sqlx::query("SELECT target_id, role_id FROM channel_roles").fetch_all(pool).await.unwrap_or_default() {
         allowed.entry(r.get("target_id")).or_default().insert(r.get("role_id"));
     }
-    let may = |id: &str, private: bool| !private || allowed.get(id).map_or(false, |set| !set.is_disjoint(&my_roles));
+    // View Channels covers everything that isn't private; a private room or
+    // channel goes by its own roles either way.
+    let view = crate::roles::has(pool, username, crate::roles::VIEW_CHANNELS).await;
+    let by_role = |id: &str| allowed.get(id).map_or(false, |set| !set.is_disjoint(&my_roles));
+    let may = |id: &str, private: bool| if private { by_role(id) } else { view };
 
+    let rooms: Vec<(String, bool)> = sqlx::query("SELECT id, is_private FROM rooms").fetch_all(pool).await.unwrap_or_default()
+        .iter().map(|r| (r.get::<String, _>("id"), r.get::<i64, _>("is_private") != 0)).collect();
+    let boards: Vec<(String, String, bool)> = sqlx::query("SELECT id, room_id, is_private FROM boards").fetch_all(pool).await.unwrap_or_default()
+        .iter().map(|b| (b.get::<String, _>("id"), b.get::<String, _>("room_id"), b.get::<i64, _>("is_private") != 0)).collect();
     let mut v = Visible::default();
-    for r in sqlx::query("SELECT id, is_private FROM rooms").fetch_all(pool).await.unwrap_or_default() {
-        let id: String = r.get("id");
-        if may(&id, r.get::<i64, _>("is_private") != 0) { v.rooms.insert(id); }
+    for (id, private) in &rooms {
+        // A public category also shows (for its private channels) to someone
+        // without View Channels who has one of those channels' roles.
+        let via_board = !*private && !view && boards.iter().any(|(b, room, bp)| room == id && *bp && by_role(b));
+        if may(id, *private) || via_board { v.rooms.insert(id.clone()); }
     }
-    for b in sqlx::query("SELECT id, room_id, is_private FROM boards").fetch_all(pool).await.unwrap_or_default() {
-        let id: String = b.get("id");
-        let room: String = b.get("room_id");
-        if v.rooms.contains(&room) && may(&id, b.get::<i64, _>("is_private") != 0) { v.boards.insert(id); }
+    for (id, room, private) in &boards {
+        if v.rooms.contains(room) && may(id, *private) { v.boards.insert(id.clone()); }
     }
     Some(v)
 }

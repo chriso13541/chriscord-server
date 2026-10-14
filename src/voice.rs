@@ -101,6 +101,123 @@ use crate::state::AppState;
 /// (board_id, username) — a participant's identity within one voice board.
 type ParticipantKey = (String, String);
 
+// ── Voice moderation: what the server won't pass on ──────────────────────────
+//
+// Enforced here, in the forwarding itself, so it holds whatever someone's
+// app does: a blocked microphone's packets are simply dropped (no Speak
+// permission, or server-muted), as are a camera's and a screen share's (no
+// Video permission). A server-deafened person's connection has every voice
+// section paused, so no one's voice reaches them. ws.rs decides who's
+// blocked (update_voice_blocks) and who's deafened.
+
+/// Their microphone isn't forwarded.
+pub const BLOCK_AUDIO: u8 = 1;
+/// Their camera and screen share (and its sound) aren't forwarded.
+pub const BLOCK_VIDEO: u8 = 2;
+
+fn blocks() -> &'static std::sync::RwLock<HashMap<String, u8>> {
+    static B: std::sync::OnceLock<std::sync::RwLock<HashMap<String, u8>>> = std::sync::OnceLock::new();
+    B.get_or_init(|| std::sync::RwLock::new(HashMap::new()))
+}
+
+pub fn set_blocked(username: &str, bits: u8) {
+    let mut b = blocks().write().unwrap();
+    if bits == 0 { b.remove(username); } else { b.insert(username.to_string(), bits); }
+}
+
+/// What isn't forwarded from this person (BLOCK_* bits). Checked for every
+/// packet, so it's a plain read lock and a lookup.
+pub fn blocked(username: &str) -> u8 {
+    blocks().read().unwrap().get(username).copied().unwrap_or(0)
+}
+
+fn deafened_set() -> &'static std::sync::Mutex<HashSet<String>> {
+    static D: std::sync::OnceLock<std::sync::Mutex<HashSet<String>>> = std::sync::OnceLock::new();
+    D.get_or_init(|| std::sync::Mutex::new(HashSet::new()))
+}
+
+pub fn is_server_deafened(username: &str) -> bool {
+    deafened_set().lock().unwrap().contains(username)
+}
+
+/// Everyone server-deafened right now (for voice_state).
+pub fn server_deafened() -> Vec<String> {
+    deafened_set().lock().unwrap().iter().cloned().collect()
+}
+
+/// The voice sections paused on each deafened person's connection, and
+/// whose voice each carried, so they can be resumed.
+type PausedVoices = HashMap<ParticipantKey, Vec<(Arc<RTCRtpTransceiver>, String)>>;
+fn paused_voices() -> &'static std::sync::Mutex<PausedVoices> {
+    static P: std::sync::OnceLock<std::sync::Mutex<PausedVoices>> = std::sync::OnceLock::new();
+    P.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
+}
+
+/// Server-deafens (or undeafens) someone, in whatever call they're in now
+/// and any they join while it lasts.
+pub async fn set_server_deafened(state: &Arc<AppState>, username: &str, on: bool) {
+    {
+        let mut d = deafened_set().lock().unwrap();
+        if on { d.insert(username.to_string()); } else { d.remove(username); }
+    }
+    let board = { state.voice.lock().unwrap().get(username).cloned() };
+    if let Some(board) = board {
+        apply_deafen(state, &(board, username.to_string())).await;
+    }
+}
+
+/// Pauses every voice sent on a deafened person's connection, or resumes
+/// them when they're not. (Pausing and resuming the same source is what
+/// replace_track does reliably here — see forget_screen_slots.)
+async fn apply_deafen(state: &Arc<AppState>, key: &ParticipantKey) {
+    if is_server_deafened(&key.1) {
+        let pc = { state.voice_runtime.connections.lock().await.get(key).cloned() };
+        let Some(pc) = pc else { return };
+        let mut paused: Vec<(Arc<RTCRtpTransceiver>, String)> = Vec::new();
+        for transceiver in pc.get_transceivers().await {
+            let sender = transceiver.sender().await;
+            let Some(track) = sender.track().await else { continue }; // empty, or paused already
+            // Voices are the "audio-<username>" sources (a screen share's
+            // sound is "screenaudio-…": watched streams keep their sound,
+            // like the app's own deafen).
+            let Some(other) = track.id().strip_prefix("audio-").map(str::to_string) else { continue };
+            if sender.replace_track(None).await.is_ok() {
+                paused.push((transceiver, other));
+            }
+        }
+        if !paused.is_empty() {
+            tracing::info!("voice: {} is server-deafened — {} voice(s) paused", key.1, paused.len());
+            paused_voices().lock().unwrap().entry(key.clone()).or_default().extend(paused);
+        }
+    } else {
+        let paused = paused_voices().lock().unwrap().remove(key).unwrap_or_default();
+        if paused.is_empty() { return; }
+        let tracks: Vec<Option<Arc<TrackLocalStaticRTP>>> = {
+            let sources = state.voice_runtime.sources.lock().await;
+            paused.iter().map(|(_, other)| sources.get(&(key.0.clone(), other.clone())).cloned()).collect()
+        };
+        for ((transceiver, _), track) in paused.into_iter().zip(tracks) {
+            let Some(track) = track else { continue }; // they've left
+            let sender = transceiver.sender().await;
+            let track_dyn: Arc<dyn TrackLocal + Send + Sync> = track as _;
+            let _ = sender.replace_track(Some(track_dyn)).await;
+        }
+        tracing::info!("voice: {} is no longer server-deafened", key.1);
+    }
+}
+
+/// apply_deafen a moment from now — for a connection that's just been
+/// (re)negotiated, once its new voice sections are in use.
+fn reapply_deafen_soon(state: &Arc<AppState>, key: &ParticipantKey) {
+    if !is_server_deafened(&key.1) { return; }
+    let state = Arc::clone(state);
+    let key = key.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(1500)).await;
+        apply_deafen(&state, &key).await;
+    });
+}
+
 /// The single UDP port all voice connections share (muxed by ICE ufrag,
 /// then by remote address). Deliberately the same number as the TCP
 /// HTTP/WebSocket port so the router only needs 7070 forwarded as TCP+UDP.
@@ -534,6 +651,9 @@ pub async fn handle_offer(
                     && remote.kind() == RTPCodecType::Video
                     && (remote.id() == "screen" || remote.stream_id() == "chriscord-screen");
                 let is_screen_audio = remote.kind() == RTPCodecType::Audio && remote.id() == "screenaudio";
+                // Which permission this track needs to be passed on: their
+                // mic, Speak (and not server-muted); anything else, Video.
+                let block_bit = if remote.kind() == RTPCodecType::Audio && !is_screen_audio { BLOCK_AUDIO } else { BLOCK_VIDEO };
                 let forward_target = if is_screen_audio {
                     tracing::info!("voice: {username_for_track}'s screen share sound arrived");
                     match screen_audio_source_for(&state, &key, remote.codec().capability).await {
@@ -571,6 +691,9 @@ pub async fn handle_offer(
                     loop {
                         match remote.read_rtp().await {
                             Ok((packet, _attrs)) => {
+                                if (blocked(&username_for_track) & block_bit) != 0 {
+                                    continue; // not allowed to be heard / seen right now: dropped
+                                }
                                 if forward_target.write_rtp(&packet).await.is_err() {
                                     break; // no one listening anymore — connection likely closing
                                 }
@@ -733,6 +856,8 @@ pub async fn handle_offer(
             renegotiate_others_for_new_source(&state_for_renegotiate, &board_id_owned, &username_owned).await;
         });
     }
+    // Server-deafened: the voices just attached are paused once it's up.
+    reapply_deafen_soon(state, &key);
 
     Ok(answer.sdp)
 }
@@ -948,6 +1073,10 @@ async fn renegotiate_one(
                 request_keyframe(&state_for_kf, &board_for_kf, &other).await;
             }
         });
+    }
+    // Server-deafened: a voice just added is paused too.
+    if !newly_attached.is_empty() {
+        reapply_deafen_soon(state, key);
     }
     Ok(())
 }
@@ -1639,6 +1768,7 @@ pub async fn handle_ice_candidate(
 /// leave a dangling PeerConnection and audio source behind.
 pub async fn close_participant(state: &Arc<AppState>, board_id: &str, username: &str) {
     let key: ParticipantKey = (board_id.to_string(), username.to_string());
+    paused_voices().lock().unwrap().remove(&key);
     if let Some(pc) = state.voice_runtime.connections.lock().await.remove(&key) {
         let _ = pc.close().await;
     }

@@ -249,6 +249,11 @@ pub async fn get_messages(
 ) -> Result<Json<Vec<ChatMessage>>, ApiErr> {
     let username = db::verify_token(&s.pool, token_from(&headers)).await
         .map_err(|_| db_err())?.ok_or_else(unauth)?;
+    // Without Read Message History: nothing from before (new messages
+    // still arrive live).
+    if !crate::roles::has(&s.pool, &username, crate::roles::READ_HISTORY).await {
+        return Ok(Json(vec![]));
+    }
     crate::access::require_board(&s.pool, &username, &board_id).await?;
 
     // Ordering by id (UUIDv7) rather than created_at: UUIDv7 embeds its
@@ -292,6 +297,11 @@ pub async fn get_messages_around(
 ) -> Result<Json<Vec<ChatMessage>>, ApiErr> {
     let username = db::verify_token(&s.pool, token_from(&headers)).await
         .map_err(|_| db_err())?.ok_or_else(unauth)?;
+    // Without Read Message History: nothing from before (new messages
+    // still arrive live).
+    if !crate::roles::has(&s.pool, &username, crate::roles::READ_HISTORY).await {
+        return Ok(Json(vec![]));
+    }
     crate::access::require_board(&s.pool, &username, &board_id).await?;
 
     const AROUND_HALF: i64 = HISTORY_PAGE / 2;
@@ -330,6 +340,11 @@ pub async fn search_messages(
 ) -> Result<Json<Vec<SearchResult>>, ApiErr> {
     let username = db::verify_token(&s.pool, token_from(&headers)).await
         .map_err(|_| db_err())?.ok_or_else(unauth)?;
+    // Without Read Message History: nothing from before (new messages
+    // still arrive live).
+    if !crate::roles::has(&s.pool, &username, crate::roles::READ_HISTORY).await {
+        return Ok(Json(vec![]));
+    }
 
     let term = q.q.trim().to_string();
     let mut wheres: Vec<String> = Vec::new();
@@ -451,6 +466,11 @@ pub async fn search_scan(
 ) -> Result<Json<serde_json::Value>, ApiErr> {
     let username = db::verify_token(&s.pool, token_from(&headers)).await
         .map_err(|_| db_err())?.ok_or_else(unauth)?;
+    // Without Read Message History: nothing from before (new messages
+    // still arrive live).
+    if !crate::roles::has(&s.pool, &username, crate::roles::READ_HISTORY).await {
+        return Ok(Json(serde_json::json!({ "messages": [], "next": null })));
+    }
 
     let mut wheres: Vec<String> = Vec::new();
     let mut binds: Vec<String> = Vec::new();
@@ -682,6 +702,11 @@ pub async fn get_pins(
 ) -> Result<Json<Vec<ChatMessage>>, ApiErr> {
     let username = db::verify_token(&s.pool, token_from(&headers)).await
         .map_err(|_| db_err())?.ok_or_else(unauth)?;
+    // Without Read Message History: nothing from before (new messages
+    // still arrive live).
+    if !crate::roles::has(&s.pool, &username, crate::roles::READ_HISTORY).await {
+        return Ok(Json(vec![]));
+    }
     crate::access::require_board(&s.pool, &username, &board_id).await?;
     let rows = sqlx::query(&format!(
         "{} WHERE board_id = ? AND pinned_at IS NOT NULL ORDER BY pinned_at DESC", SELECT

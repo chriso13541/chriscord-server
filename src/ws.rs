@@ -146,7 +146,11 @@ async fn handle_socket(socket: WebSocket, token: String, initial_status: Option<
                             "subscribe" if cm.board_id.as_deref().map_or(false, |b| !sees(&visible, b)) => {}
                             "subscribe" => {
                                 if let Some(bid) = cm.board_id {
-                                    let history = load_history(&state, &bid).await;
+                                    // Without Read Message History: an empty history (new
+                                    // messages still arrive live).
+                                    let history = if crate::roles::has(&state.pool, &username, crate::roles::READ_HISTORY).await {
+                                        load_history(&state, &bid).await
+                                    } else { Vec::new() };
                                     let payload = serde_json::json!({
                                         "type": "history", "board_id": &bid, "messages": history,
                                     });
@@ -219,6 +223,9 @@ async fn handle_socket(socket: WebSocket, token: String, initial_status: Option<
                                         // is how someone could show as muted while talking.
                                         { state.voice_status.lock().unwrap().insert(username.clone(),
                                             (cm.muted.unwrap_or(false), cm.deafened.unwrap_or(false))); }
+                                        // What the server won't pass on from them (Speak, Video,
+                                        // a server mute) — before their media starts flowing.
+                                        update_voice_blocks(&state, &username).await;
                                         broadcast_voice_state(&state);
                                         let statuses: Vec<serde_json::Value> = {
                                             let voice = state.voice.lock().unwrap();
@@ -315,6 +322,11 @@ async fn handle_socket(socket: WebSocket, token: String, initial_status: Option<
                                 }
                             }
                             "voice_video" if !may_control_voice(&username, conn_id) => {}
+                            "voice_video" if cm.video == Some(true) && (voice::blocked(&username) & voice::BLOCK_VIDEO) != 0 => {
+                                send_to_user(&state, &username, serde_json::json!({
+                                    "type": "action_denied", "message": "You don't have permission to turn on your camera here",
+                                }));
+                            }
                             "voice_video" => {
                                 if let Some(bid) = cm.board_id {
                                     let in_channel = { state.voice.lock().unwrap().get(&username) == Some(&bid) };
@@ -329,6 +341,11 @@ async fn handle_socket(socket: WebSocket, token: String, initial_status: Option<
                                 }
                             }
                             "voice_screen" if !may_control_voice(&username, conn_id) => {}
+                            "voice_screen" if cm.screen == Some(true) && (voice::blocked(&username) & voice::BLOCK_VIDEO) != 0 => {
+                                send_to_user(&state, &username, serde_json::json!({
+                                    "type": "action_denied", "message": "You don't have permission to share your screen here",
+                                }));
+                            }
                             "voice_screen" => {
                                 if let Some(bid) = cm.board_id {
                                     let in_channel = { state.voice.lock().unwrap().get(&username) == Some(&bid) };
@@ -424,6 +441,86 @@ async fn handle_socket(socket: WebSocket, token: String, initial_status: Option<
                                     }
                                 }
                             }
+                            // Voice moderation (Mute / Deafen / Move Members): on members
+                            // with a lower role. Enforced by the server's forwarding
+                            // (voice.rs), not just shown.
+                            "voice_server_mute" | "voice_server_deafen" => {
+                                let Some(target) = cm.target.clone() else { continue };
+                                let deafen = cm.msg_type == "voice_server_deafen";
+                                let perm = if deafen { crate::roles::DEAFEN_MEMBERS } else { crate::roles::MUTE_MEMBERS };
+                                let allowed = crate::roles::has(&state.pool, &username, perm).await
+                                    && (target == username || crate::roles::outranks(&state.pool, &username, &target).await);
+                                if !allowed {
+                                    send_to_user(&state, &username, serde_json::json!({
+                                        "type": "action_denied",
+                                        "message": format!("You can't server-{} {target}", if deafen { "deafen" } else { "mute" }),
+                                    }));
+                                    continue;
+                                }
+                                if deafen {
+                                    let on = cm.deafened.unwrap_or(false);
+                                    voice::set_server_deafened(&state, &target, on).await;
+                                    tracing::info!("voice: {username} {} {target}", if on { "server-deafened" } else { "undeafened" });
+                                } else {
+                                    let on = cm.muted.unwrap_or(false);
+                                    { let mut m = server_muted().lock().unwrap(); if on { m.insert(target.clone()); } else { m.remove(&target); } }
+                                    update_voice_blocks(&state, &target).await;
+                                    tracing::info!("voice: {username} {} {target}", if on { "server-muted" } else { "unmuted" });
+                                }
+                                broadcast_voice_state(&state);
+                            }
+                            // Move someone to another voice channel (board_id), or
+                            // disconnect them (no board_id). They're taken out of the
+                            // call they're in here and now, so it holds whatever their
+                            // app does; for a move, their app is told to join the other.
+                            "voice_move" => {
+                                let Some(target) = cm.target.clone() else { continue };
+                                let allowed = crate::roles::has(&state.pool, &username, crate::roles::MOVE_MEMBERS).await
+                                    && crate::roles::outranks(&state.pool, &username, &target).await;
+                                if !allowed {
+                                    send_to_user(&state, &username, serde_json::json!({
+                                        "type": "action_denied", "message": format!("You can't move {target}"),
+                                    }));
+                                    continue;
+                                }
+                                let from = { state.voice.lock().unwrap().get(&target).cloned() };
+                                let Some(from) = from else { continue }; // not in a call
+                                let dest = cm.board_id.clone().filter(|b| !b.is_empty());
+                                if let Some(dest) = &dest {
+                                    if *dest == from { continue; }
+                                    let room_type: Option<String> = sqlx::query(
+                                        "SELECT rooms.room_type AS room_type FROM boards JOIN rooms ON boards.room_id = rooms.id WHERE boards.id = ?"
+                                    ).bind(dest).fetch_optional(&state.pool).await.ok().flatten().map(|r| r.get("room_type"));
+                                    if room_type.as_deref() != Some("voice") || !crate::access::can_view_board(&state.pool, &target, dest).await {
+                                        send_to_user(&state, &username, serde_json::json!({
+                                            "type": "action_denied", "message": format!("{target} can't be moved there"),
+                                        }));
+                                        continue;
+                                    }
+                                }
+                                let target_conn = voice_owner(&target);
+                                { voice_owners().lock().unwrap().remove(&target); }
+                                { state.voice.lock().unwrap().remove(&target); }
+                                { state.voice_status.lock().unwrap().remove(&target); }
+                                voice::close_participant(&state, &from, &target).await;
+                                broadcast_voice_state(&state);
+                                match dest {
+                                    Some(dest) => {
+                                        tracing::info!("voice: {username} moved {target} to {dest}");
+                                        let _ = state.tx.send(serde_json::json!({
+                                            "type": "voice_move", "target": target, "target_conn": target_conn,
+                                            "board_id": dest, "by": username,
+                                        }).to_string());
+                                    }
+                                    None => {
+                                        tracing::info!("voice: {username} disconnected {target}");
+                                        let _ = state.tx.send(serde_json::json!({
+                                            "type": "voice_removed", "target": target, "target_conn": target_conn,
+                                            "message": format!("{username} disconnected you from the call"),
+                                        }).to_string());
+                                    }
+                                }
+                            }
                             "voice_mute_state" if !may_control_voice(&username, conn_id) => {}
                             "voice_mute_state" => {
                                 if let Some(bid) = cm.board_id {
@@ -500,6 +597,37 @@ async fn handle_socket(socket: WebSocket, token: String, initial_status: Option<
                             }
                             // Their nickname on this server only ("" clears it, so their
                             // global nickname or username shows again).
+                            "set_nickname" if !crate::roles::has(&state.pool, &username, crate::roles::CHANGE_NICKNAME).await => {
+                                send_to_user(&state, &username, serde_json::json!({
+                                    "type": "action_denied", "message": "You don't have permission to change your nickname on this server",
+                                }));
+                            }
+                            // Someone else's nickname on this server (Manage Nicknames,
+                            // members with a lower role only).
+                            "set_member_nickname" => {
+                                let Some(target) = cm.target.clone() else { continue };
+                                let allowed = crate::roles::has(&state.pool, &username, crate::roles::MANAGE_NICKNAMES).await
+                                    && (target == username || crate::roles::outranks(&state.pool, &username, &target).await);
+                                if !allowed {
+                                    send_to_user(&state, &username, serde_json::json!({
+                                        "type": "action_denied", "message": format!("You can't change {target}'s nickname"),
+                                    }));
+                                    continue;
+                                }
+                                match crate::profile::clean_nickname(cm.nickname.as_deref().unwrap_or("")) {
+                                    Ok(nick) => {
+                                        let saved = sqlx::query("UPDATE users SET nickname = ? WHERE username = ?")
+                                            .bind(&nick).bind(&target).execute(&state.pool).await;
+                                        if saved.map(|r| r.rows_affected()).unwrap_or(0) > 0 {
+                                            tracing::info!("nickname: {username} set {target}'s to {:?}", nick);
+                                            broadcast_users(&state);
+                                        }
+                                    }
+                                    Err(why) => send_to_user(&state, &username, serde_json::json!({
+                                        "type": "action_denied", "message": why,
+                                    })),
+                                }
+                            }
                             "set_nickname" => {
                                 match crate::profile::clean_nickname(cm.nickname.as_deref().unwrap_or("")) {
                                     Ok(nick) => {
@@ -576,6 +704,11 @@ async fn handle_socket(socket: WebSocket, token: String, initial_status: Option<
                             // Channels or roles changed: work out again what this member can see.
                             if matches!(v["type"].as_str(), Some("rooms_updated") | Some("roles_updated")) {
                                 visible = crate::access::visible_for(&state.pool, &username).await;
+                                // In a call: Speak / Video may have changed.
+                                let in_call = { state.voice.lock().unwrap().contains_key(&username) };
+                                if in_call && voice_owner(&username) == Some(conn_id) {
+                                    update_voice_blocks(&state, &username).await;
+                                }
                                 // In a voice channel they can no longer see? Take them out of it.
                                 let in_board = { state.voice.lock().unwrap().get(&username).cloned() };
                                 if let Some(bid) = in_board.filter(|b| !sees(&visible, b) && voice_owner(&username) == Some(conn_id)) {
@@ -619,6 +752,9 @@ async fn handle_socket(socket: WebSocket, token: String, initial_status: Option<
                                         && voice_owner(&username) == Some(conn_id) // not your other devices
                                 }
                                 Some("voice_moved") => v["target"].as_str() == Some(username.as_str()) && v["target_conn"].as_u64() == Some(conn_id),
+                                // Moved or disconnected by a moderator: the device that was in the call.
+                                Some("voice_move") | Some("voice_removed") => v["target"].as_str() == Some(username.as_str())
+                                    && (v["target_conn"].is_null() || v["target_conn"].as_u64() == Some(conn_id)),
                                 // Key exchange: only to the others in that same call (just the
                                 // one it's addressed to, if it is), on the device in the call.
                                 Some("voice_e2ee") => {
@@ -759,6 +895,44 @@ fn video_on() -> &'static std::sync::Mutex<std::collections::HashSet<String>> {
     ON.get_or_init(|| std::sync::Mutex::new(std::collections::HashSet::new()))
 }
 fn voice_owner(user: &str) -> Option<u64> { voice_owners().lock().unwrap().get(user).copied() }
+
+/// Who a moderator has server-muted (until they're unmuted; kept while the
+/// server runs, across leaving and rejoining calls).
+fn server_muted() -> &'static std::sync::Mutex<std::collections::HashSet<String>> {
+    static M: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<String>>> = std::sync::OnceLock::new();
+    M.get_or_init(|| std::sync::Mutex::new(std::collections::HashSet::new()))
+}
+
+/// Works out what the server won't pass on from someone in a call (see
+/// voice.rs): their mic without Speak or while server-muted, their camera
+/// and screen without Video. Losing Video switches a camera or share off.
+async fn update_voice_blocks(state: &Arc<AppState>, username: &str) {
+    let perms = crate::roles::permissions_of(&state.pool, username).await;
+    let muted = { server_muted().lock().unwrap().contains(username) };
+    let mut bits = 0u8;
+    if perms & crate::roles::SPEAK == 0 || muted { bits |= voice::BLOCK_AUDIO; }
+    if perms & crate::roles::VIDEO == 0 { bits |= voice::BLOCK_VIDEO; }
+    let before = voice::blocked(username);
+    voice::set_blocked(username, bits);
+    if bits & voice::BLOCK_VIDEO != 0 {
+        let had_camera = { video_on().lock().unwrap().remove(username) };
+        let had_screen = { screen_on().lock().unwrap().remove(username) };
+        if had_screen {
+            { screen_window().lock().unwrap().remove(username); }
+            let board = { state.voice.lock().unwrap().get(username).cloned() };
+            if let Some(board) = board {
+                voice::screen_stopped(state, &board, username).await;
+            }
+        }
+        if had_camera || had_screen {
+            send_to_user(state, username, serde_json::json!({
+                "type": "action_denied", "message": "You don't have permission to use video here any more",
+            }));
+            broadcast_voice_state(state);
+        }
+    }
+    if before != bits { broadcast_voice_state(state); }
+}
 /// True if this connection may act on the account's call: it's the owner,
 /// or nobody owns it right now.
 /// The most a voice_e2ee message may be (bytes of JSON): a call key and
@@ -805,9 +979,20 @@ fn broadcast_voice_state(state: &Arc<AppState>) {
         let w = screen_window().lock().unwrap();
         screens.iter().filter_map(|u| w.get(u).map(|s| (u.clone(), serde_json::Value::String(s.clone())))).collect()
     };
+    // Who the server isn't letting be heard (no Speak, or server-muted) and
+    // who's server-deafened — only people in a call.
+    let (server_muted, server_deafened): (Vec<String>, Vec<String>) = {
+        let voice = state.voice.lock().unwrap();
+        let deaf = voice::server_deafened();
+        (
+            voice.keys().filter(|u| voice::blocked(u) & voice::BLOCK_AUDIO != 0).cloned().collect(),
+            deaf.into_iter().filter(|u| voice.contains_key(u)).collect(),
+        )
+    };
     let _ = state.tx.send(serde_json::json!({
         "type": "voice_state", "channels": channels, "reconnecting": reconnecting, "mute_states": mute_states,
         "video_on": video, "screen_on": screens, "screen_window": screen_window,
+        "server_muted": server_muted, "server_deafened": server_deafened,
     }).to_string());
 }
 

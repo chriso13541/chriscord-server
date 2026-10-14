@@ -67,7 +67,7 @@ pub async fn create(headers: HeaderMap, State(s): State<Arc<AppState>>) -> Resul
     let username = db::verify_token(&s.pool, token).await
         .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({ "error": "DB error" }))))?
         .ok_or_else(|| (StatusCode::UNAUTHORIZED, Json(serde_json::json!({ "error": "Unauthorized" }))))?;
-    // (Later: crate::roles::require(&s.pool, &username, crate::roles::CREATE_INVITES, "create invite links").await?;)
+    crate::roles::require(&s.pool, &username, crate::roles::CREATE_INVITE, "create invite links").await?;
 
     let now = chrono::Utc::now();
     let expires = now + chrono::Duration::minutes(INVITE_TTL_MINUTES);

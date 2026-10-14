@@ -36,26 +36,73 @@ pub const KICK_MEMBERS: u64 = 1 << 5;
 pub const BAN_MEMBERS: u64 = 1 << 6;
 pub const PIN_MESSAGES: u64 = 1 << 7;
 pub const ADMINISTRATOR: u64 = 1 << 8;
+/// "Manage Expressions": rename, hide and delete custom emoji and stickers.
 pub const MANAGE_EMOJIS: u64 = 1 << 9;
-pub const ALL: u64 = (1 << 10) - 1;
+/// "Create Expressions": upload new custom emoji and stickers.
+pub const CREATE_EXPRESSIONS: u64 = 1 << 10;
+/// See channels that aren't private (private ones go by their roles).
+pub const VIEW_CHANNELS: u64 = 1 << 11;
+/// See messages sent before you opened a channel (history, search, pins).
+pub const READ_HISTORY: u64 = 1 << 12;
+pub const CREATE_INVITE: u64 = 1 << 13;
+/// Change your own nickname on this server.
+pub const CHANGE_NICKNAME: u64 = 1 << 14;
+/// Change other members' nicknames (lower roles only).
+pub const MANAGE_NICKNAMES: u64 = 1 << 15;
+/// Your links show previews (the apps check the sender's roles).
+pub const EMBED_LINKS: u64 = 1 << 16;
+/// Be heard in voice channels (the server stops forwarding a mic without it).
+pub const SPEAK: u64 = 1 << 17;
+/// Turn on a camera or share a screen in voice channels.
+pub const VIDEO: u64 = 1 << 18;
+/// Server-mute others in voice (lower roles only).
+pub const MUTE_MEMBERS: u64 = 1 << 19;
+/// Server-deafen others in voice (lower roles only).
+pub const DEAFEN_MEMBERS: u64 = 1 << 20;
+/// Move others between voice channels, or disconnect them (lower roles only).
+pub const MOVE_MEMBERS: u64 = 1 << 21;
+/// Rearrange channels and categories (order, and which category a channel is in).
+pub const MANAGE_CHANNELS: u64 = 1 << 22;
+pub const ALL: u64 = (1 << 23) - 1;
 
 /// What @everyone can do on a new server — what everyone could do before
 /// roles existed.
-pub const DEFAULT_PERMISSIONS: u64 = SEND_MESSAGES | ATTACH_FILES | ADD_REACTIONS | CONNECT | PIN_MESSAGES;
+pub const DEFAULT_PERMISSIONS: u64 = SEND_MESSAGES | ATTACH_FILES | ADD_REACTIONS | CONNECT | PIN_MESSAGES
+    | VIEW_CHANNELS | READ_HISTORY | CREATE_INVITE | CHANGE_NICKNAME | EMBED_LINKS | SPEAK | VIDEO;
 
-/// The list the admin panel draws its checkboxes from.
+/// Permissions added after servers already existed, that everyone had in
+/// effect before (there was no way to stop them): given to @everyone once,
+/// when a server first starts with them, so nothing changes until the owner
+/// decides otherwise.
+const ADDED_V2_FOR_EVERYONE: u64 = VIEW_CHANNELS | READ_HISTORY | CREATE_INVITE | CHANGE_NICKNAME | EMBED_LINKS | SPEAK | VIDEO;
+
+/// The list the admin panel draws its checkboxes from, grouped like
+/// Discord's ("group" heads each section).
 fn catalog() -> serde_json::Value {
     serde_json::json!([
-        { "bit": SEND_MESSAGES, "name": "Send Messages", "about": "Post messages in text channels." },
-        { "bit": ATTACH_FILES, "name": "Attach Files", "about": "Upload pictures, videos and other files." },
-        { "bit": ADD_REACTIONS, "name": "Add Reactions", "about": "React to messages with emoji." },
-        { "bit": PIN_MESSAGES, "name": "Pin Messages", "about": "Pin and unpin messages in a channel." },
-        { "bit": MANAGE_MESSAGES, "name": "Manage Messages", "about": "Delete other people's messages (and pin/unpin)." },
-        { "bit": CONNECT, "name": "Connect to Voice", "about": "Join voice channels." },
-        { "bit": MANAGE_EMOJIS, "name": "Manage Emoji & Stickers", "about": "Upload, rename, hide and delete the server's custom emoji and stickers." },
-        { "bit": KICK_MEMBERS, "name": "Kick Members", "about": "Remove members with a lower role from the server. They can rejoin." },
-        { "bit": BAN_MEMBERS, "name": "Ban Members", "about": "Remove members with a lower role and stop them rejoining." },
-        { "bit": ADMINISTRATOR, "name": "Administrator", "about": "Every permission above. Give this out carefully." },
+        { "bit": VIEW_CHANNELS, "group": "General", "name": "View Channels", "about": "See channels that aren't private. Private channels go by their own roles." },
+        { "bit": MANAGE_CHANNELS, "group": "General", "name": "Manage Channels", "about": "Rearrange channels and categories in the app." },
+        { "bit": CREATE_EXPRESSIONS, "group": "General", "name": "Create Expressions", "about": "Upload custom emoji and stickers." },
+        { "bit": MANAGE_EMOJIS, "group": "General", "name": "Manage Expressions", "about": "Rename, hide and delete the server's custom emoji and stickers." },
+        { "bit": CREATE_INVITE, "group": "Membership", "name": "Create Invite", "about": "Make invite links for people to join." },
+        { "bit": CHANGE_NICKNAME, "group": "Membership", "name": "Change Nickname", "about": "Set their own nickname on this server." },
+        { "bit": MANAGE_NICKNAMES, "group": "Membership", "name": "Manage Nicknames", "about": "Change the nicknames of members with a lower role." },
+        { "bit": KICK_MEMBERS, "group": "Membership", "name": "Kick Members", "about": "Remove members with a lower role from the server. They can rejoin." },
+        { "bit": BAN_MEMBERS, "group": "Membership", "name": "Ban Members", "about": "Remove members with a lower role and stop them rejoining." },
+        { "bit": SEND_MESSAGES, "group": "Text", "name": "Send Messages", "about": "Post messages in text channels." },
+        { "bit": EMBED_LINKS, "group": "Text", "name": "Embed Links", "about": "Links they send show previews." },
+        { "bit": ATTACH_FILES, "group": "Text", "name": "Attach Files", "about": "Upload pictures, videos and other files." },
+        { "bit": ADD_REACTIONS, "group": "Text", "name": "Add Reactions", "about": "React to messages with emoji." },
+        { "bit": READ_HISTORY, "group": "Text", "name": "Read Message History", "about": "See messages sent before they opened a channel, search them, and see pins." },
+        { "bit": PIN_MESSAGES, "group": "Text", "name": "Pin Messages", "about": "Pin and unpin messages in a channel." },
+        { "bit": MANAGE_MESSAGES, "group": "Text", "name": "Manage Messages", "about": "Delete other people's messages (and pin/unpin)." },
+        { "bit": CONNECT, "group": "Voice", "name": "Connect", "about": "Join voice channels." },
+        { "bit": SPEAK, "group": "Voice", "name": "Speak", "about": "Be heard in voice channels. Without it, the server doesn't pass their microphone on." },
+        { "bit": VIDEO, "group": "Voice", "name": "Video", "about": "Turn on their camera or share their screen in voice channels." },
+        { "bit": MUTE_MEMBERS, "group": "Voice", "name": "Mute Members", "about": "Server-mute members with a lower role, so nobody hears them." },
+        { "bit": DEAFEN_MEMBERS, "group": "Voice", "name": "Deafen Members", "about": "Server-deafen members with a lower role, so they hear nobody." },
+        { "bit": MOVE_MEMBERS, "group": "Voice", "name": "Move Members", "about": "Move members with a lower role to another voice channel, or disconnect them." },
+        { "bit": ADMINISTRATOR, "group": "Advanced", "name": "Administrator", "about": "Every permission above. Give this out carefully." },
     ])
 }
 
@@ -87,6 +134,16 @@ pub async fn init(pool: &SqlitePool) -> Result<(), sqlx::Error> {
          VALUES (?, '@everyone', '', 0, 0, ?, 1, ?)",
     ).bind(DEFAULT_ROLE_ID).bind(DEFAULT_PERMISSIONS as i64).bind(chrono::Utc::now().to_rfc3339())
      .execute(pool).await?;
+    // Servers from before the permissions above: @everyone keeps what
+    // everyone could already do, and whoever could manage emoji can still
+    // upload them. Once only — after that the owner's choices stand.
+    if db::get_config(pool, "permissions_v2").await?.is_none() {
+        sqlx::query("UPDATE roles SET permissions = permissions | ? WHERE is_default = 1")
+            .bind(ADDED_V2_FOR_EVERYONE as i64).execute(pool).await?;
+        sqlx::query("UPDATE roles SET permissions = permissions | ? WHERE (permissions & ?) != 0")
+            .bind(CREATE_EXPRESSIONS as i64).bind(MANAGE_EMOJIS as i64).execute(pool).await?;
+        db::set_config(pool, "permissions_v2", "1").await?;
+    }
     Ok(())
 }
 
@@ -134,6 +191,13 @@ async fn top_position(pool: &SqlitePool, username: &str) -> i64 {
         .and_then(|r| r.try_get::<Option<i64>, _>("p").ok().flatten()).unwrap_or(0)
 }
 
+/// Whether `actor` may act on `target` as a moderator: the target's highest
+/// role has to be lower than theirs (the owner outranks everyone; nobody
+/// outranks the owner).
+pub async fn outranks(pool: &SqlitePool, actor: &str, target: &str) -> bool {
+    actor != target && top_position(pool, actor).await > top_position(pool, target).await
+}
+
 fn broadcast_roles(s: &AppState) {
     let _ = s.tx.send(serde_json::json!({ "type": "roles_updated" }).to_string());
 }
@@ -168,6 +232,10 @@ pub async fn get_roles(headers: HeaderMap, State(s): State<Arc<AppState>>) -> Re
     let (roles, members) = roles_json(&s.pool).await.map_err(|_| dberr())?;
     Ok(Json(serde_json::json!({
         "roles": roles, "members": members, "my_permissions": permissions_of(&s.pool, &username).await,
+        // 2: the permissions list from View Channels (2048) up exists and is
+        // enforced. Older servers leave this out, and apps treat those
+        // permissions as allowed there.
+        "permissions_version": 2,
     })))
 }
 

@@ -125,6 +125,20 @@ async fn manager(h: &HeaderMap, s: &AppState) -> Result<String, ApiErr> {
     Ok(user)
 }
 
+/// Who's uploading: the owner key, or a member with Create Expressions (or
+/// Manage Expressions, which includes it).
+async fn uploader(h: &HeaderMap, s: &AppState) -> Result<String, ApiErr> {
+    if crate::admin::check_owner(h, s).is_ok() {
+        return Ok(String::new());
+    }
+    let user = member(h, s).await?;
+    let perms = roles::permissions_of(&s.pool, &user).await;
+    if perms & (roles::CREATE_EXPRESSIONS | roles::MANAGE_EMOJIS) == 0 {
+        return Err(err(StatusCode::FORBIDDEN, "You don't have permission to upload emoji on this server"));
+    }
+    Ok(user)
+}
+
 /// Fails if a visible emoji other than `except` already has this name.
 async fn name_free(pool: &SqlitePool, name: &str, except: &str) -> Result<(), ApiErr> {
     let taken = sqlx::query("SELECT 1 FROM emojis WHERE hidden = 0 AND name = ? COLLATE NOCASE AND id != ?")
@@ -189,7 +203,7 @@ pub async fn upload(
     State(s): State<Arc<AppState>>,
     body: Bytes,
 ) -> Result<Json<serde_json::Value>, ApiErr> {
-    let by = manager(&headers, &s).await?;
+    let by = uploader(&headers, &s).await?;
     let name = q.name.trim();
     if !valid_name(name) {
         return Err(bad("Emoji names are 2–32 letters, numbers or underscores"));
