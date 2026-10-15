@@ -601,9 +601,12 @@ async fn handle_socket(socket: WebSocket, token: String, initial_status: Option<
                                 // A readable status from before (or from the address it
                                 // connected with) no longer applies.
                                 state.presence.lock().unwrap().remove(&username);
-                                presence_blobs().lock().unwrap().insert(username.clone(), blob.clone());
+                                // One per device ("conn"): someone on two computers has
+                                // two, and each app works out which to show (the one in
+                                // a call, else the one playing something).
+                                presence_blobs().lock().unwrap().entry(username.clone()).or_default().insert(conn_id, blob.clone());
                                 let _ = state.tx.send(serde_json::json!({
-                                    "type": "presence", "username": username, "blob": blob,
+                                    "type": "presence", "username": username, "blob": blob, "conn": conn_id,
                                 }).to_string());
                             }
                             // What game they're playing (their app works it out, if they
@@ -789,7 +792,7 @@ async fn handle_socket(socket: WebSocket, token: String, initial_status: Option<
                                 // keys others need and retries messages it couldn't open. Only for
                                 // channels this member can see (or none named).
                                 Some("e2ee_changed") => v["board_id"].as_str().map_or(true, |b| b == crate::channel_keys::PRESENCE_KEY_ID || sees(&visible, b)),
-                                Some("presence") => true,
+                                Some("presence") | Some("presence_gone") => true,
                                 // Imported history added or claimed (imports.rs): the app loads
                                 // the channel again if it's showing it.
                                 Some("history_changed") => v["board_id"].as_str().map_or(true, |b| sees(&visible, b)),
@@ -855,9 +858,16 @@ async fn handle_socket(socket: WebSocket, token: String, initial_status: Option<
             let _ = state.tx.send(serde_json::json!({ "type": "typing", "username": username, "typing": false }).to_string());
         } else {
             *c -= 1;
-            // Their other device stays: only the game this one reported goes.
+            // Their other device stays: only the game this one reported goes,
+            // and this one's status.
             let mut a = activities().lock().unwrap();
             if a.get(&username).map_or(false, |cur| cur.conn == conn_id) { a.remove(&username); }
+            let gone = presence_blobs().lock().unwrap().get_mut(&username).map_or(false, |m| m.remove(&conn_id).is_some());
+            if gone {
+                let _ = state.tx.send(serde_json::json!({
+                    "type": "presence_gone", "username": username, "conn": conn_id,
+                }).to_string());
+            }
         }
     }
     broadcast_users(&state);
@@ -1070,10 +1080,11 @@ struct Activity { conn: u64, name: String, since: String }
 /// The most a status blob may be (it's padded to one size well under this).
 const MAX_PRESENCE_BLOB: usize = 4096;
 
-/// Each connected member's latest status blob ("presence"), for people
-/// who connect later.
-fn presence_blobs() -> &'static std::sync::Mutex<std::collections::HashMap<String, String>> {
-    static P: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, String>>> = std::sync::OnceLock::new();
+/// Each connected member's latest status blob ("presence") from each of their
+/// devices (connection id → blob), for people who connect later.
+type DeviceBlobs = std::collections::HashMap<String, std::collections::HashMap<u64, String>>;
+fn presence_blobs() -> &'static std::sync::Mutex<DeviceBlobs> {
+    static P: std::sync::OnceLock<std::sync::Mutex<DeviceBlobs>> = std::sync::OnceLock::new();
     P.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
 }
 
@@ -1083,7 +1094,7 @@ fn activities() -> &'static std::sync::Mutex<std::collections::HashMap<String, A
 }
 
 pub fn broadcast_users(state: &Arc<AppState>) {
-    let (online, statuses, playing, blobs) = {
+    let (online, statuses, playing, blobs, devices) = {
         let o = state.online.lock().unwrap();
         let p = state.presence.lock().unwrap();
         let acts = activities().lock().unwrap();
@@ -1092,9 +1103,16 @@ pub fn broadcast_users(state: &Arc<AppState>) {
         let mut statuses = serde_json::Map::new();
         let mut playing = serde_json::Map::new();
         let mut blobs = serde_json::Map::new();
+        let mut devices = serde_json::Map::new();
         for user in o.keys() {
-            if let Some(b) = pb.get(user) {
-                blobs.insert(user.clone(), serde_json::Value::String(b.clone()));
+            if let Some(m) = pb.get(user) {
+                // "presence_blobs": one of them, for apps from before devices.
+                if let Some(b) = m.values().next() {
+                    blobs.insert(user.clone(), serde_json::Value::String(b.clone()));
+                }
+                let d: serde_json::Map<String, serde_json::Value> = m.iter()
+                    .map(|(c, b)| (c.to_string(), serde_json::Value::String(b.clone()))).collect();
+                devices.insert(user.clone(), serde_json::Value::Object(d));
             }
             let st = p.get(user).map(String::as_str).unwrap_or("online");
             if st == "invisible" { continue; }
@@ -1104,7 +1122,7 @@ pub fn broadcast_users(state: &Arc<AppState>) {
                 playing.insert(user.clone(), serde_json::json!({ "name": a.name, "since": a.since }));
             }
         }
-        (online, statuses, playing, blobs)
+        (online, statuses, playing, blobs, devices)
     };
     let state = Arc::clone(state);
     tokio::spawn(async move {
@@ -1130,7 +1148,7 @@ pub fn broadcast_users(state: &Arc<AppState>) {
         }
         let _ = state.tx.send(serde_json::json!({
             "type": "users", "online": online, "presence": statuses, "all": all, "owner": owner,
-            "activities": playing, "presence_blobs": blobs,
+            "activities": playing, "presence_blobs": blobs, "presence_devices": devices,
             "nicknames": nicknames, "global_nicknames": global_nicknames,
         }).to_string());
     });
