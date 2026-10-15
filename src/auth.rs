@@ -52,6 +52,9 @@ pub struct JoinResp {
     pub token:       String,
     pub username:    String,
     pub fingerprint: String, // first 16 hex chars of public key — display identity
+    /// Statuses travel as encrypted blobs ("presence" in ws.rs): the app
+    /// sends no readable status here.
+    pub encrypted_presence: bool,
 }
 
 type ApiErr = (StatusCode, Json<serde_json::Value>);
@@ -256,5 +259,5 @@ pub async fn join(
 
     let fingerprint = body.public_key[..16].to_string();
 
-    Ok(Json(JoinResp { token, username, fingerprint }))
+    Ok(Json(JoinResp { token, username, fingerprint, encrypted_presence: true }))
 }

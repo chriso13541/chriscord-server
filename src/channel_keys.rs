@@ -138,7 +138,15 @@ async fn visibility(pool: &SqlitePool, members: &[Member]) -> HashMap<String, Op
     out
 }
 
+/// The key for status blobs (online/away/invisible and what game — see
+/// ws.rs "presence"): one for the whole server, so every member counts as
+/// seeing it, and it's replaced when someone leaves, like a channel's.
+pub const PRESENCE_KEY_ID: &str = "@presence";
+
 fn sees(vis: &HashMap<String, Option<Visible>>, username: &str, board_id: &str) -> bool {
+    if board_id == PRESENCE_KEY_ID {
+        return vis.contains_key(username);
+    }
     match vis.get(username) {
         Some(Some(v)) => v.boards.contains(board_id),
         Some(None) => true,
@@ -147,6 +155,7 @@ fn sees(vis: &HashMap<String, Option<Visible>>, username: &str, board_id: &str) 
 }
 
 async fn board_exists(pool: &SqlitePool, board_id: &str) -> bool {
+    if board_id == PRESENCE_KEY_ID { return true; }
     sqlx::query("SELECT 1 FROM boards WHERE id = ?").bind(board_id)
         .fetch_optional(pool).await.ok().flatten().is_some()
 }
@@ -207,7 +216,7 @@ pub async fn get_keys(
     State(s): State<Arc<AppState>>,
 ) -> Result<Json<serde_json::Value>, ApiErr> {
     let (user, my_key) = me(&headers, &s).await?;
-    crate::access::require_board(&s.pool, &user, &board_id).await?;
+    if board_id != PRESENCE_KEY_ID { crate::access::require_board(&s.pool, &user, &board_id).await?; }
     if !board_exists(&s.pool, &board_id).await { return Err(err(StatusCode::NOT_FOUND, "Channel not found")); }
 
     let all = all_members(&s.pool).await;
@@ -273,7 +282,7 @@ pub async fn new_generation(
     Json(b): Json<NewGenerationReq>,
 ) -> Result<Json<serde_json::Value>, ApiErr> {
     let (user, my_key) = me(&headers, &s).await?;
-    crate::access::require_board(&s.pool, &user, &board_id).await?;
+    if board_id != PRESENCE_KEY_ID { crate::access::require_board(&s.pool, &user, &board_id).await?; }
     if !board_exists(&s.pool, &board_id).await { return Err(err(StatusCode::NOT_FOUND, "Channel not found")); }
     if b.boxes.len() > MAX_BOXES || b.boxes.iter().any(|x| x.sealed.len() > MAX_BOX_LEN) {
         return Err(bad("Too many or too large keys"));

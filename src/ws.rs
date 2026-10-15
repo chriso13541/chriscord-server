@@ -75,6 +75,10 @@ struct ClientMsg {
     nickname:        Option<String>,
     /// set_status: "online" | "idle" | "invisible"
     status:          Option<String>,
+    /// set_activity: the game they're playing ("" or absent: none)
+    game:            Option<String>,
+    /// presence: their status, encrypted (see "presence" below)
+    blob:            Option<String>,
     /// typing: whether they're typing right now
     typing:          Option<bool>,
     /// voice_e2ee: who it's for (absent: everyone in the call)
@@ -584,6 +588,49 @@ async fn handle_socket(socket: WebSocket, token: String, initial_status: Option<
                                     if changed { broadcast_users(&state); }
                                 }
                             }
+                            // Their status — online / away / invisible, and what they're
+                            // playing — sealed with the server-wide presence key
+                            // (channel_keys.rs), so all the server ever sees is a blob
+                            // of the same size, sent about once a minute whether
+                            // anything changed or not. It's passed on as it is; each
+                            // app opens it and decides how to show them (an invisible
+                            // person's app says so inside, and everyone's app hides
+                            // them). Nothing about it is logged.
+                            "presence" => {
+                                let Some(blob) = cm.blob.filter(|b| b.len() <= MAX_PRESENCE_BLOB && b.starts_with("e2ee:1:")) else { continue };
+                                // A readable status from before (or from the address it
+                                // connected with) no longer applies.
+                                state.presence.lock().unwrap().remove(&username);
+                                presence_blobs().lock().unwrap().insert(username.clone(), blob.clone());
+                                let _ = state.tx.send(serde_json::json!({
+                                    "type": "presence", "username": username, "blob": blob,
+                                }).to_string());
+                            }
+                            // What game they're playing (their app works it out, if they
+                            // let it), shown as "Playing …" by their name. One per
+                            // account: the device that set it, until it clears it or
+                            // disconnects.
+                            "set_activity" => {
+                                let game: String = cm.game.as_deref().unwrap_or("").chars()
+                                    .filter(|c| !c.is_control()).take(128).collect::<String>().trim().to_string();
+                                let changed = {
+                                    let mut a = activities().lock().unwrap();
+                                    if game.is_empty() {
+                                        let mine = a.get(&username).map_or(false, |cur| cur.conn == conn_id);
+                                        if mine { a.remove(&username); }
+                                        mine
+                                    } else {
+                                        let since = match a.get(&username) {
+                                            Some(cur) if cur.name == game => cur.since.clone(),
+                                            _ => chrono::Utc::now().to_rfc3339(),
+                                        };
+                                        let same = a.get(&username).map_or(false, |cur| cur.name == game && cur.conn == conn_id);
+                                        a.insert(username.clone(), Activity { conn: conn_id, name: game, since });
+                                        !same
+                                    }
+                                };
+                                if changed { broadcast_users(&state); }
+                            }
                             // Typing indicator. Never sent for invisible users —
                             // typing would give away that they're actually on.
                             // Clients drop a stale "typing" on their own after
@@ -741,7 +788,8 @@ async fn handle_socket(socket: WebSocket, token: String, initial_status: Option<
                                 // Message encryption keys moved (channel_keys.rs): the app shares
                                 // keys others need and retries messages it couldn't open. Only for
                                 // channels this member can see (or none named).
-                                Some("e2ee_changed") => v["board_id"].as_str().map_or(true, |b| sees(&visible, b)),
+                                Some("e2ee_changed") => v["board_id"].as_str().map_or(true, |b| b == crate::channel_keys::PRESENCE_KEY_ID || sees(&visible, b)),
+                                Some("presence") => true,
                                 // Imported history added or claimed (imports.rs): the app loads
                                 // the channel again if it's showing it.
                                 Some("history_changed") => v["board_id"].as_str().map_or(true, |b| sees(&visible, b)),
@@ -801,9 +849,16 @@ async fn handle_socket(socket: WebSocket, token: String, initial_status: Option<
         if *c <= 1 {
             o.remove(&username);
             state.presence.lock().unwrap().remove(&username);
+            activities().lock().unwrap().remove(&username);
+            presence_blobs().lock().unwrap().remove(&username);
             // Stop any typing indicator left showing for them.
             let _ = state.tx.send(serde_json::json!({ "type": "typing", "username": username, "typing": false }).to_string());
-        } else { *c -= 1; }
+        } else {
+            *c -= 1;
+            // Their other device stays: only the game this one reported goes.
+            let mut a = activities().lock().unwrap();
+            if a.get(&username).map_or(false, |cur| cur.conn == conn_id) { a.remove(&username); }
+        }
     }
     broadcast_users(&state);
 
@@ -1008,19 +1063,48 @@ fn broadcast_voice_state(state: &Arc<AppState>) {
 /// person's status ("online" or "idle"). Not "statuses" — that key already
 /// means the voice mute/deafen list on voice_status_snapshot, and the Go
 /// client decodes every server message into one struct.
+/// The game someone's playing (set_activity), and which of their
+/// connections said so.
+struct Activity { conn: u64, name: String, since: String }
+
+/// The most a status blob may be (it's padded to one size well under this).
+const MAX_PRESENCE_BLOB: usize = 4096;
+
+/// Each connected member's latest status blob ("presence"), for people
+/// who connect later.
+fn presence_blobs() -> &'static std::sync::Mutex<std::collections::HashMap<String, String>> {
+    static P: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, String>>> = std::sync::OnceLock::new();
+    P.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+fn activities() -> &'static std::sync::Mutex<std::collections::HashMap<String, Activity>> {
+    static A: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, Activity>>> = std::sync::OnceLock::new();
+    A.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
 pub fn broadcast_users(state: &Arc<AppState>) {
-    let (online, statuses) = {
+    let (online, statuses, playing, blobs) = {
         let o = state.online.lock().unwrap();
         let p = state.presence.lock().unwrap();
+        let acts = activities().lock().unwrap();
+        let pb = presence_blobs().lock().unwrap();
         let mut online = Vec::new();
         let mut statuses = serde_json::Map::new();
+        let mut playing = serde_json::Map::new();
+        let mut blobs = serde_json::Map::new();
         for user in o.keys() {
+            if let Some(b) = pb.get(user) {
+                blobs.insert(user.clone(), serde_json::Value::String(b.clone()));
+            }
             let st = p.get(user).map(String::as_str).unwrap_or("online");
             if st == "invisible" { continue; }
             online.push(user.clone());
             statuses.insert(user.clone(), serde_json::Value::String(st.to_string()));
+            if let Some(a) = acts.get(user) {
+                playing.insert(user.clone(), serde_json::json!({ "name": a.name, "since": a.since }));
+            }
         }
-        (online, statuses)
+        (online, statuses, playing, blobs)
     };
     let state = Arc::clone(state);
     tokio::spawn(async move {
@@ -1046,6 +1130,7 @@ pub fn broadcast_users(state: &Arc<AppState>) {
         }
         let _ = state.tx.send(serde_json::json!({
             "type": "users", "online": online, "presence": statuses, "all": all, "owner": owner,
+            "activities": playing, "presence_blobs": blobs,
             "nicknames": nicknames, "global_nicknames": global_nicknames,
         }).to_string());
     });
