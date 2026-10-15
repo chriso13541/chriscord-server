@@ -667,7 +667,7 @@ const joinKeySaver = makeSaver({ btn: $('joinkey-save'), msg: $('joinkey-msg'), 
   read: () => $('cfg-joinkey').value,
   save: () => api('/api/admin/settings', { json: { server_key: $('cfg-joinkey').value } }) });
 $('joinkey-gen').onclick = () => { const a = new Uint8Array(6); crypto.getRandomValues(a); setValue($('cfg-joinkey'), [...a].map(b => b.toString(16).padStart(2, '0')).join('')); };
-$('joinkey-copy').onclick = () => navigator.clipboard.writeText($('cfg-joinkey').value).then(() => toast('Join key copied'));
+$('joinkey-copy').onclick = () => copyText($('cfg-joinkey').value, 'Join key');
 
 // ── Customization ────────────────────────────────────────────────────
 function updateDescCount() { $('desc-count').textContent = `${[...$('cfg-desc').value].length} / 300`; }
@@ -1262,8 +1262,7 @@ async function loadHosting(quiet = false) {
       loadHosting();
     });
     tr.querySelector('[data-key]').onclick = async () => {
-      try { const r = await api(`/api/admin/hosting/${x.id}/owner-key`);
-        await navigator.clipboard.writeText(r.owner_key).then(() => toast(`${x.name}'s owner key copied`), () => prompt(`${x.name}'s owner key`, r.owner_key)); }
+      try { const r = await api(`/api/admin/hosting/${x.id}/owner-key`); showSecret(`${x.name}'s owner key`, r.owner_key, addr); }
       catch (e) { toast(e.message, true); }
     };
     tr.querySelector('[data-remove]').onclick = () => removeHosted(x);
@@ -1298,6 +1297,36 @@ $('host-add').onclick = async () => {
   catch (e) { flash('host-msg', e.message, false); }
   finally { $('host-add').disabled = false; }
 };
+
+// ── Copying ──────────────────────────────────────────────────────────
+// The Clipboard API only exists on https:// pages (and localhost) — not on
+// the panel opened over plain http from another computer — so there's a
+// fallback that works there too.
+async function copyText(text, what) {
+  try {
+    if (window.isSecureContext && navigator.clipboard?.writeText) { await navigator.clipboard.writeText(text); toast(`${what} copied`); return true; }
+  } catch {}
+  const ta = document.createElement('textarea');
+  ta.value = text; ta.setAttribute('readonly', ''); ta.style.cssText = 'position:fixed;top:-1000px;opacity:0';
+  document.body.appendChild(ta); ta.select();
+  let ok = false; try { ok = document.execCommand('copy'); } catch {}
+  ta.remove();
+  if (ok) toast(`${what} copied`); else toast(`Couldn\u2019t copy — select it and press Ctrl+C`, true);
+  return ok;
+}
+// Shows a key (selectable) with a Copy button.
+function showSecret(title, value, adminURL) {
+  const box = $('modal-box');
+  box.innerHTML = `<h3>${esc(title)}</h3><p class="hint">Use it to sign in to that server's own admin panel${adminURL ? ` (<a href="${esc(adminURL)}" target="_blank" rel="noopener">open it</a>)` : ''}. Keep it private.</p>
+    <input type="text" id="secret-val" readonly spellcheck="false" style="font-family:Consolas,monospace;margin-top:10px">
+    <div class="row" style="margin-top:14px"><span class="msg" id="modal-msg"></span><button class="ghost" id="modal-cancel">Close</button><button id="secret-copy">${icon('content_copy')}Copy</button></div>`;
+  $('secret-val').value = value;
+  $('modal').classList.add('on');
+  $('modal-cancel').onclick = () => $('modal').classList.remove('on');
+  $('secret-copy').onclick = () => copyText(value, 'Owner key');
+  $('secret-val').onfocus = e => e.target.select();
+  $('secret-val').focus();
+}
 
 // ── Confirm dialog ───────────────────────────────────────────────────
 function confirmBox(title, text, action, run, withReason = false) {
