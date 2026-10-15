@@ -25,8 +25,15 @@
 // Routes:
 //   POST /api/admin/import/session    the importer's own member account (owner key)
 //   POST /api/admin/import/authors    add/update imported people (owner key)
-//   POST /api/admin/import/existing   which message ids are already here (owner key)
-//   POST /api/admin/import/messages   add a batch of messages to a channel (owner key)
+//   POST /api/admin/import/channel    the channel an exported one goes in, found or made (owner key)
+//   POST /api/admin/import/channel/applied  an export of it has been brought in (owner key)
+//   POST /api/admin/import/existing   which message ids are already here, with their fingerprints
+//   POST /api/admin/import/messages   add (or update) a batch of messages in a channel (owner key)
+//
+// Importing again later (a newer export) adds what's new and updates what
+// changed; the importer decides which, from each message's fingerprint
+// (import_digest — a keyed hash the server can't learn anything from) and
+// from how recent the last export applied to the channel was.
 //   GET  /api/admin/imported          imported people, their claims (owner key)
 //   POST /api/admin/imported/:source/:id/link     {username} — give them to a member
 //   POST /api/admin/imported/:source/:id/unlink
@@ -90,6 +97,28 @@ pub async fn init(pool: &SqlitePool) -> Result<(), sqlx::Error> {
             public_key   TEXT NOT NULL,         -- who's asking
             requested_at TEXT NOT NULL,
             PRIMARY KEY (source, source_id, public_key)
+        )",
+    ).execute(pool).await?;
+    // Which channel here each imported one went to, so a later export of
+    // it lands in the same place even after a rename — and how recent the
+    // last export applied to it was (its newest message, then the file's
+    // time), so an older one doesn't undo a newer one's edits.
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS imported_channels (
+            source      TEXT NOT NULL,
+            source_id   TEXT NOT NULL,
+            board_id    TEXT NOT NULL,
+            as_of_ms    INTEGER NOT NULL DEFAULT 0,
+            as_of_mtime INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (source, source_id)
+        )",
+    ).execute(pool).await?;
+    // Imported messages someone deleted here, so importing again doesn't
+    // bring them back.
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS imported_deleted (
+            id         TEXT PRIMARY KEY,
+            deleted_at TEXT NOT NULL
         )",
     ).execute(pool).await?;
     sqlx::query("CREATE INDEX IF NOT EXISTS idx_messages_imported ON messages (imported_from)")
@@ -353,6 +382,118 @@ pub async fn authors(
 }
 
 #[derive(Deserialize)]
+pub struct ChannelReq {
+    source:    String,
+    source_id: String,
+    /// The category and channel names, for one that's new here.
+    room:      String,
+    name:      String,
+    /// Only look: don't make anything.
+    #[serde(default)]
+    dry_run:   bool,
+}
+
+/// POST /api/admin/import/channel — the channel an exported one goes in:
+/// wherever it went last time (however it's been renamed or moved since),
+/// else a text channel of that name in a category of that name, else a new
+/// one. Answers with how recent the last export applied to it was.
+pub async fn channel(
+    headers: HeaderMap,
+    State(s): State<Arc<AppState>>,
+    Json(b): Json<ChannelReq>,
+) -> Result<Json<serde_json::Value>, ApiErr> {
+    check_owner(&headers, &s)?;
+    let from = format!("{}:{}", b.source, b.source_id);
+    let Some((source, sid)) = split_from(&from) else { return Err(bad("Invalid source or id")) };
+    let (source, sid) = (source.to_string(), sid.to_string());
+
+    let known = sqlx::query(
+        "SELECT c.board_id AS board_id, c.as_of_ms AS as_of_ms, c.as_of_mtime AS as_of_mtime, b.name AS name, r.name AS room
+         FROM imported_channels c JOIN boards b ON b.id = c.board_id JOIN rooms r ON r.id = b.room_id
+         WHERE c.source = ? AND c.source_id = ?",
+    ).bind(&source).bind(&sid).fetch_optional(&s.pool).await.map_err(|_| dberr())?;
+    if let Some(r) = known {
+        return Ok(Json(serde_json::json!({
+            "board_id": r.get::<String, _>("board_id"), "name": r.get::<String, _>("name"),
+            "room": r.get::<String, _>("room"), "created": false,
+            "as_of": [r.get::<i64, _>("as_of_ms"), r.get::<i64, _>("as_of_mtime")],
+        })));
+    }
+
+    let room: String = { let r: String = b.room.trim().chars().take(100).collect(); if r.is_empty() { "Imported".into() } else { r } };
+    let name: String = { let n: String = b.name.trim().chars().take(100).collect(); if n.is_empty() { "imported".into() } else { n } };
+    let room_id: Option<String> = sqlx::query("SELECT id FROM rooms WHERE room_type = 'text' AND name = ? COLLATE NOCASE ORDER BY position, created_at LIMIT 1")
+        .bind(&room).fetch_optional(&s.pool).await.map_err(|_| dberr())?.map(|r| r.get("id"));
+    let board_id: Option<String> = match &room_id {
+        Some(rid) => sqlx::query("SELECT id FROM boards WHERE room_id = ? AND name = ? COLLATE NOCASE ORDER BY position, created_at LIMIT 1")
+            .bind(rid).bind(&name).fetch_optional(&s.pool).await.map_err(|_| dberr())?.map(|r| r.get("id")),
+        None => None,
+    };
+    if b.dry_run {
+        return Ok(Json(serde_json::json!({
+            "board_id": board_id.clone().unwrap_or_default(), "name": name, "room": room,
+            "created": board_id.is_none(), "as_of": null,
+        })));
+    }
+    let now = chrono::Utc::now().to_rfc3339();
+    let mut created = false;
+    let room_id = match room_id {
+        Some(r) => r,
+        None => {
+            let id = uuid::Uuid::now_v7().to_string();
+            sqlx::query("INSERT INTO rooms (id, name, is_private, room_type, created_at, position) VALUES (?, ?, 0, 'text', ?, ?)")
+                .bind(&id).bind(&room).bind(&now).bind(crate::layout::next_room_position(&s.pool).await)
+                .execute(&s.pool).await.map_err(|_| dberr())?;
+            created = true;
+            id
+        }
+    };
+    let board_id = match board_id {
+        Some(bid) => bid,
+        None => {
+            let id = uuid::Uuid::now_v7().to_string();
+            sqlx::query("INSERT INTO boards (id, room_id, name, created_at, position) VALUES (?, ?, ?, ?, ?)")
+                .bind(&id).bind(&room_id).bind(&name).bind(&now).bind(crate::layout::next_board_position(&s.pool, &room_id).await)
+                .execute(&s.pool).await.map_err(|_| dberr())?;
+            created = true;
+            id
+        }
+    };
+    sqlx::query("INSERT OR REPLACE INTO imported_channels (source, source_id, board_id, as_of_ms, as_of_mtime) VALUES (?, ?, ?, 0, 0)")
+        .bind(&source).bind(&sid).bind(&board_id).execute(&s.pool).await.map_err(|_| dberr())?;
+    if created {
+        let _ = s.tx.send(serde_json::json!({ "type": "rooms_updated" }).to_string());
+    }
+    Ok(Json(serde_json::json!({
+        "board_id": board_id, "name": name, "room": room, "created": created, "as_of": [0, 0],
+    })))
+}
+
+#[derive(Deserialize)]
+pub struct AppliedReq {
+    source:      String,
+    source_id:   String,
+    as_of_ms:    i64,
+    as_of_mtime: i64,
+}
+
+/// POST /api/admin/import/channel/applied — an export of this channel has
+/// been brought in; remembered if it's the newest so far.
+pub async fn channel_applied(
+    headers: HeaderMap,
+    State(s): State<Arc<AppState>>,
+    Json(b): Json<AppliedReq>,
+) -> Result<Json<serde_json::Value>, ApiErr> {
+    check_owner(&headers, &s)?;
+    sqlx::query("UPDATE imported_channels SET as_of_ms = ?, as_of_mtime = ?
+                 WHERE source = ? AND source_id = ? AND (as_of_ms < ? OR (as_of_ms = ? AND as_of_mtime < ?))")
+        .bind(b.as_of_ms).bind(b.as_of_mtime).bind(&b.source).bind(&b.source_id)
+        .bind(b.as_of_ms).bind(b.as_of_ms).bind(b.as_of_mtime)
+        .execute(&s.pool).await.map_err(|_| dberr())?;
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+#[derive(Deserialize)]
 pub struct ExistingReq {
     ids: Vec<String>,
 }
@@ -367,15 +508,29 @@ pub async fn existing(
     check_owner(&headers, &s)?;
     if b.ids.len() > 5000 { return Err(bad("Too many ids at once")); }
     let mut found = Vec::new();
+    let mut info = serde_json::Map::new();
     for chunk in b.ids.chunks(500) {
-        let sql = format!("SELECT id FROM messages WHERE id IN ({})", vec!["?"; chunk.len()].join(","));
+        let sql = format!("SELECT id, import_digest FROM messages WHERE id IN ({})", vec!["?"; chunk.len()].join(","));
         let mut q = sqlx::query(&sql);
         for id in chunk { q = q.bind(id); }
         for r in q.fetch_all(&s.pool).await.map_err(|_| dberr())? {
-            found.push(r.get::<String, _>("id"));
+            let id: String = r.get("id");
+            let digest: Option<String> = r.try_get("import_digest").ok().flatten();
+            info.insert(id.clone(), serde_json::json!({ "digest": digest.unwrap_or_default() }));
+            found.push(id);
+        }
+        // Deleted here since: counts as there (and isn't to be brought back).
+        let sql = format!("SELECT id FROM imported_deleted WHERE id IN ({})", vec!["?"; chunk.len()].join(","));
+        let mut q = sqlx::query(&sql);
+        for id in chunk { q = q.bind(id); }
+        for r in q.fetch_all(&s.pool).await.map_err(|_| dberr())? {
+            let id: String = r.get("id");
+            if info.contains_key(&id) { continue; }
+            info.insert(id.clone(), serde_json::json!({ "digest": "", "deleted": true }));
+            found.push(id);
         }
     }
-    Ok(Json(serde_json::json!({ "existing": found })))
+    Ok(Json(serde_json::json!({ "existing": found, "info": info })))
 }
 
 #[derive(Deserialize)]
@@ -403,6 +558,13 @@ pub struct MessageIn {
     pinned:        bool,
     #[serde(default)]
     reactions:     Vec<ReactionIn>,
+    /// The importer's fingerprint of it (opaque here).
+    #[serde(default)]
+    digest:        Option<String>,
+    /// For one that's here already, what to replace: "content" (text and
+    /// files), "meta" (pin and reaction counts) or "all". None: add it.
+    #[serde(default)]
+    update:        Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -439,8 +601,62 @@ pub async fn messages(
 
     let mut tx = s.pool.begin().await.map_err(|_| dberr())?;
     let mut inserted = 0;
+    let mut updated = 0;
+    // Files that updated messages no longer use: removed once it's saved.
+    let mut dropped_files: Vec<String> = Vec::new();
     for m in &b.messages {
         let id = uuid::Uuid::parse_str(&m.id).map_err(|_| bad("Message ids must be UUIDs"))?.to_string();
+        let digest: Option<String> = m.digest.as_deref().map(|d| d.chars().take(128).collect());
+        if let Some(what) = m.update.as_deref() {
+            let (content, meta) = match what {
+                "content" => (true, false),
+                "meta" => (false, true),
+                "all" => (true, true),
+                _ => return Err(bad("update must be content, meta or all")),
+            };
+            // Only an imported message of that same person, in this channel.
+            let Some(row) = sqlx::query("SELECT attachments, created_at FROM messages WHERE id = ? AND board_id = ? AND imported_from = ?")
+                .bind(&id).bind(&b.board_id).bind(&m.imported_from)
+                .fetch_optional(&mut *tx).await.map_err(|_| dberr())? else { continue };
+            if content {
+                if m.content.len() > MAX_CONTENT { return Err(bad("A message is too long")); }
+                let old: Vec<crate::messages::Attachment> = row.try_get::<Option<String>, _>("attachments").ok().flatten()
+                    .and_then(|j| serde_json::from_str(&j).ok()).unwrap_or_default();
+                for a in &old {
+                    if !m.attachments.iter().any(|n| n.url == a.url) { dropped_files.push(a.url.clone()); }
+                }
+                let reply_to = m.reply_to.as_deref().and_then(|r| uuid::Uuid::parse_str(r).ok()).map(|u| u.to_string());
+                sqlx::query("UPDATE messages SET content = ?, attachments = ?, edited = ?, reply_to = ? WHERE id = ?")
+                    .bind(&m.content).bind(serde_json::to_string(&m.attachments).unwrap_or_else(|_| "[]".into()))
+                    .bind(m.edited as i64).bind(&reply_to).bind(&id)
+                    .execute(&mut *tx).await.map_err(|_| dberr())?;
+            }
+            if meta {
+                // Pinned on Discord now: pinned here too (keeping an earlier
+                // pin's time); unpinned there: unpinned here.
+                let created: String = row.get("created_at");
+                if m.pinned {
+                    sqlx::query("UPDATE messages SET pinned_at = COALESCE(pinned_at, ?) WHERE id = ?")
+                        .bind(&created).bind(&id).execute(&mut *tx).await.map_err(|_| dberr())?;
+                } else {
+                    sqlx::query("UPDATE messages SET pinned_at = NULL, pinned_by = NULL WHERE id = ?")
+                        .bind(&id).execute(&mut *tx).await.map_err(|_| dberr())?;
+                }
+                sqlx::query("DELETE FROM imported_reactions WHERE message_id = ?")
+                    .bind(&id).execute(&mut *tx).await.map_err(|_| dberr())?;
+                for re in m.reactions.iter().take(crate::messages::MAX_REACTION_EMOJI) {
+                    let emoji = re.emoji.trim();
+                    if emoji.is_empty() || emoji.len() > 64 || re.count <= 0 { continue; }
+                    sqlx::query("INSERT OR REPLACE INTO imported_reactions (message_id, emoji, count) VALUES (?, ?, ?)")
+                        .bind(&id).bind(emoji).bind(re.count.min(1_000_000))
+                        .execute(&mut *tx).await.map_err(|_| dberr())?;
+                }
+            }
+            sqlx::query("UPDATE messages SET import_digest = ? WHERE id = ?")
+                .bind(&digest).bind(&id).execute(&mut *tx).await.map_err(|_| dberr())?;
+            updated += 1;
+            continue;
+        }
         let created = chrono::DateTime::parse_from_rfc3339(&m.created_at)
             .map_err(|_| bad("created_at must be an RFC 3339 time"))?
             .with_timezone(&chrono::Utc).to_rfc3339();
@@ -453,12 +669,12 @@ pub async fn messages(
         let reply_to = m.reply_to.as_deref().and_then(|r| uuid::Uuid::parse_str(r).ok()).map(|u| u.to_string());
         let pinned_at = m.pinned.then(|| created.clone());
         let r = sqlx::query(
-            "INSERT OR IGNORE INTO messages (id, board_id, username, content, attachments, edited, created_at, reply_to, kind, pinned_at, imported_from)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT OR IGNORE INTO messages (id, board_id, username, content, attachments, edited, created_at, reply_to, kind, pinned_at, imported_from, import_digest)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(&id).bind(&b.board_id).bind(&names[&m.imported_from]).bind(&m.content)
         .bind(serde_json::to_string(&m.attachments).unwrap_or_else(|_| "[]".into()))
-        .bind(m.edited as i64).bind(&created).bind(&reply_to).bind(kind).bind(&pinned_at).bind(&m.imported_from)
+        .bind(m.edited as i64).bind(&created).bind(&reply_to).bind(kind).bind(&pinned_at).bind(&m.imported_from).bind(&digest)
         .execute(&mut *tx).await.map_err(|e| { tracing::warn!("import: {e}"); dberr() })?;
         if r.rows_affected() == 0 { continue; } // already imported
         inserted += 1;
@@ -471,11 +687,20 @@ pub async fn messages(
         }
     }
     tx.commit().await.map_err(|_| dberr())?;
-    if inserted > 0 {
-        tracing::info!("import: {inserted} message(s) into board {}", b.board_id);
+    // The encrypted files updated messages replaced (nothing else uses them).
+    for url in &dropped_files {
+        let Some(name) = url.strip_prefix("/api/files/").and_then(crate::files::safe_name) else { continue };
+        let still_used = sqlx::query("SELECT 1 FROM messages WHERE attachments LIKE ? LIMIT 1")
+            .bind(format!("%\"/api/files/{name}\"%")).fetch_optional(&s.pool).await.ok().flatten().is_some();
+        if !still_used {
+            let _ = tokio::fs::remove_file(format!("{}/{}", crate::files::UPLOAD_DIR, name)).await;
+        }
+    }
+    if inserted > 0 || updated > 0 {
+        tracing::info!("import: {inserted} new and {updated} updated message(s) in board {}", b.board_id);
         history_changed(&s, Some(b.board_id.as_str()));
     }
-    Ok(Json(serde_json::json!({ "ok": true, "inserted": inserted })))
+    Ok(Json(serde_json::json!({ "ok": true, "inserted": inserted, "updated": updated })))
 }
 
 /// Imported reaction counts for these messages: id → [(emoji, count)], in

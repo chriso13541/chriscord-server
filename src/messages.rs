@@ -692,6 +692,9 @@ pub async fn delete_message(
     }
     let board_id: String = row.get("board_id");
 
+    // An imported one: remembered, so importing again doesn't bring it back.
+    let _ = sqlx::query("INSERT OR IGNORE INTO imported_deleted (id, deleted_at) SELECT id, ? FROM messages WHERE id = ? AND imported_from IS NOT NULL")
+        .bind(chrono::Utc::now().to_rfc3339()).bind(&id).execute(&s.pool).await;
     sqlx::query("DELETE FROM messages WHERE id = ?").bind(&id).execute(&s.pool).await.map_err(|_| db_err())?;
     let _ = sqlx::query("DELETE FROM reactions WHERE message_id = ?").bind(&id).execute(&s.pool).await;
     let _ = sqlx::query("DELETE FROM imported_reactions WHERE message_id = ?").bind(&id).execute(&s.pool).await;

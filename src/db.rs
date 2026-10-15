@@ -186,6 +186,9 @@ pub async fn init() -> Result<SqlitePool, sqlx::Error> {
         // Imported history (imports.rs): whose it originally was,
         // "discord:<their id>" (NULL = written here).
         "ALTER TABLE messages ADD COLUMN imported_from TEXT",
+        // …and its fingerprint from the importer, which tells it whether a
+        // later export changed it (opaque to the server: a keyed hash).
+        "ALTER TABLE messages ADD COLUMN import_digest TEXT",
     ];
     for sql in migrations {
         let _ = sqlx::query(sql).execute(&pool).await;

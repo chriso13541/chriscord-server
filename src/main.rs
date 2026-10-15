@@ -260,6 +260,8 @@ async fn main() {
         .route("/api/admin/import/session",  post(imports::session))
         .route("/api/admin/import/authors",  post(imports::authors)
             .layer(DefaultBodyLimit::max(256 << 20))) // carries profile pictures
+        .route("/api/admin/import/channel",  post(imports::channel))
+        .route("/api/admin/import/channel/applied", post(imports::channel_applied))
         .route("/api/admin/import/existing", post(imports::existing))
         .route("/api/admin/import/messages", post(imports::messages)
             .layer(DefaultBodyLimit::max(64 << 20)))
