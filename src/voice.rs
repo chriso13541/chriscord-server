@@ -169,8 +169,43 @@ pub async fn set_can_listen(state: &Arc<AppState>, username: &str, can: bool) ->
         if let Some(board) = board {
             apply_deafen(state, &(board, username.to_string())).await;
         }
+        watch_deafen(state, username);
     }
     changed
+}
+
+/// Marks someone server-deafened without anything else — for loading the
+/// saved ones when the server starts (ws::init_moderation).
+pub fn mark_server_deafened(username: &str) {
+    deafened_set().lock().unwrap().insert(username.to_string());
+}
+
+fn deafen_watched() -> &'static std::sync::Mutex<HashSet<String>> {
+    static W: std::sync::OnceLock<std::sync::Mutex<HashSet<String>>> = std::sync::OnceLock::new();
+    W.get_or_init(|| std::sync::Mutex::new(HashSet::new()))
+}
+
+/// Keeps someone who hears no one (server-deafened, or no Listen) that way
+/// for as long as they're in a call: every couple of seconds, any voice
+/// that's reached their connection since (someone joined, a renegotiation,
+/// their own rejoin) is paused too. Pausing what's already paused is
+/// nothing, so this is cheap. Stops when it's lifted or they leave the call
+/// (joining again starts it again: handle_offer).
+pub fn watch_deafen(state: &Arc<AppState>, username: &str) {
+    if !hears_nobody(username) { return; }
+    if !deafen_watched().lock().unwrap().insert(username.to_string()) { return; } // already watching
+    let state = Arc::clone(state);
+    let username = username.to_string();
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(Duration::from_secs(2)).await;
+            if !hears_nobody(&username) { break; }
+            let board = { state.voice.lock().unwrap().get(&username).cloned() };
+            let Some(board) = board else { break };
+            apply_deafen(&state, &(board, username.clone())).await;
+        }
+        deafen_watched().lock().unwrap().remove(&username);
+    });
 }
 
 /// Everyone server-deafened right now (for voice_state).
@@ -197,6 +232,7 @@ pub async fn set_server_deafened(state: &Arc<AppState>, username: &str, on: bool
     if let Some(board) = board {
         apply_deafen(state, &(board, username.to_string())).await;
     }
+    watch_deafen(state, username);
 }
 
 /// Pauses every voice sent on a deafened person's connection, or resumes
@@ -248,6 +284,7 @@ fn reapply_deafen_soon(state: &Arc<AppState>, key: &ParticipantKey) {
     tokio::spawn(async move {
         tokio::time::sleep(Duration::from_millis(1500)).await;
         apply_deafen(&state, &key).await;
+        watch_deafen(&state, &key.1); // and anything that arrives later
     });
 }
 

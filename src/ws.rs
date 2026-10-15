@@ -464,10 +464,12 @@ async fn handle_socket(socket: WebSocket, token: String, initial_status: Option<
                                 if deafen {
                                     let on = cm.deafened.unwrap_or(false);
                                     voice::set_server_deafened(&state, &target, on).await;
+                                    save_moderation(&state.pool, &target).await;
                                     tracing::info!("voice: {username} {} {target}", if on { "server-deafened" } else { "undeafened" });
                                 } else {
                                     let on = cm.muted.unwrap_or(false);
                                     { let mut m = server_muted().lock().unwrap(); if on { m.insert(target.clone()); } else { m.remove(&target); } }
+                                    save_moderation(&state.pool, &target).await;
                                     update_voice_blocks(&state, &target).await;
                                     tracing::info!("voice: {username} {} {target}", if on { "server-muted" } else { "unmuted" });
                                 }
@@ -964,8 +966,42 @@ fn video_on() -> &'static std::sync::Mutex<std::collections::HashSet<String>> {
 }
 fn voice_owner(user: &str) -> Option<u64> { voice_owners().lock().unwrap().get(user).copied() }
 
-/// Who a moderator has server-muted (until they're unmuted; kept while the
-/// server runs, across leaving and rejoining calls).
+/// Server mutes and deafens are kept until a moderator lifts them — across
+/// leaving and rejoining calls, disconnecting, and the server restarting
+/// (saved in voice_moderation, loaded here at start).
+pub async fn init_moderation(pool: &sqlx::SqlitePool) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS voice_moderation (
+            username TEXT PRIMARY KEY,
+            muted    INTEGER NOT NULL DEFAULT 0,
+            deafened INTEGER NOT NULL DEFAULT 0
+        )",
+    ).execute(pool).await?;
+    let rows = sqlx::query("SELECT username, muted, deafened FROM voice_moderation").fetch_all(pool).await?;
+    for r in rows {
+        let user: String = r.get("username");
+        if r.get::<i64, _>("muted") != 0 { server_muted().lock().unwrap().insert(user.clone()); }
+        if r.get::<i64, _>("deafened") != 0 { voice::mark_server_deafened(&user); }
+    }
+    Ok(())
+}
+
+/// Saves someone's server mute/deafen as it is now (no row when neither).
+async fn save_moderation(pool: &sqlx::SqlitePool, username: &str) {
+    let muted = server_muted().lock().unwrap().contains(username);
+    let deafened = voice::is_server_deafened(username);
+    let res = if muted || deafened {
+        sqlx::query("INSERT INTO voice_moderation (username, muted, deafened) VALUES (?, ?, ?)
+                     ON CONFLICT(username) DO UPDATE SET muted = excluded.muted, deafened = excluded.deafened")
+            .bind(username).bind(muted as i64).bind(deafened as i64).execute(pool).await
+    } else {
+        sqlx::query("DELETE FROM voice_moderation WHERE username = ?").bind(username).execute(pool).await
+    };
+    if let Err(e) = res { tracing::warn!("voice: couldn't save {username}'s server mute/deafen: {e}"); }
+}
+
+/// Who a moderator has server-muted (until they're unmuted — saved, see
+/// init_moderation).
 fn server_muted() -> &'static std::sync::Mutex<std::collections::HashSet<String>> {
     static M: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<String>>> = std::sync::OnceLock::new();
     M.get_or_init(|| std::sync::Mutex::new(std::collections::HashSet::new()))

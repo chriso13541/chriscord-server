@@ -135,6 +135,7 @@ async fn main() {
     channel_keys::init(&pool).await.expect("Failed to set up message encryption keys");
     imports::init(&pool).await.expect("Failed to set up imported history");
     hosting::init(&pool).await.expect("Failed to set up hosted servers");
+    ws::init_moderation(&pool).await.expect("Failed to set up voice moderation");
     zips::clear_leftovers(); // "Download all" zips from before a restart
 
     let owner_key =
