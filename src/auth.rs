@@ -23,6 +23,9 @@ pub struct ServerInfoResp {
     pub owner:             Option<String>,
     /// The server's own theme, or None if it's using the default look.
     pub theme:             Option<crate::admin::ServerTheme>,
+    /// The largest file it takes, in MB (0 = no limit) — so the app can say
+    /// a file's too big before uploading any of it.
+    pub max_upload_mb:     u64,
 }
 
 #[derive(Deserialize)]
@@ -78,6 +81,7 @@ pub async fn server_info(State(s): State<Arc<AppState>>) -> Json<ServerInfoResp>
         icon_updated_at: crate::admin::icon_updated_at(&s.pool).await,
         theme: Some(crate::admin::server_theme(&s.pool).await).filter(|t| !t.is_default()),
         owner: crate::admin::owner_username(&s.pool).await,
+        max_upload_mb: crate::admin::upload_limit_mb(&s.pool).await,
     })
 }
 
