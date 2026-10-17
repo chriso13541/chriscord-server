@@ -67,7 +67,13 @@ pub const MANAGE_CHANNELS: u64 = 1 << 22;
 /// anyone's voice (like being server-deafened) — e.g. for a bot that should
 /// only talk.
 pub const LISTEN: u64 = 1 << 23;
-pub const ALL: u64 = (1 << 24) - 1;
+/// Add bots to the server, choose what they may do and see, and remove
+/// them (bots.rs). Never given to a bot.
+pub const MANAGE_BOTS: u64 = 1 << 24;
+/// Bring in history with the Discord importer (imports.rs) — instead of
+/// handing out the owner key. Only the owner can give it to a bot.
+pub const IMPORT_MESSAGES: u64 = 1 << 25;
+pub const ALL: u64 = (1 << 26) - 1;
 
 /// What @everyone can do on a new server — what everyone could do before
 /// roles existed.
@@ -107,6 +113,8 @@ fn catalog() -> serde_json::Value {
         { "bit": MUTE_MEMBERS, "group": "Voice", "name": "Mute Members", "about": "Server-mute members with a lower role, so nobody hears them." },
         { "bit": DEAFEN_MEMBERS, "group": "Voice", "name": "Deafen Members", "about": "Server-deafen members with a lower role, so they hear nobody." },
         { "bit": MOVE_MEMBERS, "group": "Voice", "name": "Move Members", "about": "Move members with a lower role to another voice channel, or disconnect them." },
+        { "bit": MANAGE_BOTS, "group": "Membership", "name": "Manage Bots", "about": "Add bots to the server from their Add to server links, choose what each may do and which channels it sees, and remove them. A bot never gets more than the person adding it has." },
+        { "bit": IMPORT_MESSAGES, "group": "Advanced", "name": "Import Messages", "about": "Bring in message history with the Discord importer, without the owner key." },
         { "bit": ADMINISTRATOR, "group": "Advanced", "name": "Administrator", "about": "Every permission above. Give this out carefully." },
     ])
 }
@@ -167,6 +175,10 @@ async fn public_key_of(pool: &SqlitePool, username: &str) -> Option<String> {
 
 /// Everything this member is allowed to do.
 pub async fn permissions_of(pool: &SqlitePool, username: &str) -> u64 {
+    // A bot has only what it was given when it was added (bots.rs).
+    if let Some(p) = crate::bots::permissions(pool, username).await {
+        return p;
+    }
     if crate::admin::owner_username(pool).await.as_deref() == Some(username) {
         return ALL;
     }
@@ -244,9 +256,10 @@ pub async fn get_roles(headers: HeaderMap, State(s): State<Arc<AppState>>) -> Re
     Ok(Json(serde_json::json!({
         "roles": roles, "members": members, "my_permissions": permissions_of(&s.pool, &username).await,
         // 2: the permissions from View Channels (2048) up exist and are
-        // enforced; 3: Listen too. Older servers leave this out, and apps
-        // treat the permissions those servers don't have as allowed there.
-        "permissions_version": 3,
+        // enforced; 3: Listen too; 4: Manage Bots and Import Messages, and
+        // bots (bots.rs). Older servers leave this out, and apps treat the
+        // permissions those servers don't have as allowed there.
+        "permissions_version": 4,
     })))
 }
 

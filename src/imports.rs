@@ -58,6 +58,18 @@ fn err(code: StatusCode, msg: &str) -> ApiErr {
     (code, Json(serde_json::json!({ "error": msg })))
 }
 fn dberr() -> ApiErr { err(StatusCode::INTERNAL_SERVER_ERROR, "DB error") }
+
+/// Who may import: the owner key (Ok(None)), or a member whose roles give
+/// them Import Messages (Ok(Some(their name))) — so an importer bot never
+/// needs the owner key.
+async fn importer(h: &HeaderMap, s: &AppState) -> Result<Option<String>, ApiErr> {
+    if check_owner(h, s).is_ok() { return Ok(None); }
+    let token = h.get("X-Session-Token").and_then(|v| v.to_str().ok()).unwrap_or("");
+    let user = db::verify_token(&s.pool, token).await.map_err(|_| dberr())?
+        .ok_or_else(|| err(StatusCode::UNAUTHORIZED, "Importing needs the owner key, or a member with the Import Messages permission"))?;
+    crate::roles::require(&s.pool, &user, crate::roles::IMPORT_MESSAGES, "import messages").await?;
+    Ok(Some(user))
+}
 fn bad(msg: &str) -> ApiErr { err(StatusCode::BAD_REQUEST, msg) }
 
 /// Longest username, as auth::join allows.
@@ -284,7 +296,13 @@ pub async fn session(
     State(s): State<Arc<AppState>>,
     Json(b): Json<SessionReq>,
 ) -> Result<Json<serde_json::Value>, ApiErr> {
-    check_owner(&headers, &s)?;
+    let via = importer(&headers, &s).await?;
+    // A member with Import Messages (a bot, say) imports as itself, with
+    // the session it already has.
+    if let Some(user) = via {
+        let token = headers.get("X-Session-Token").and_then(|v| v.to_str().ok()).unwrap_or("").to_string();
+        return Ok(Json(serde_json::json!({ "token": token, "username": user })));
+    }
     let key = b.public_key.trim().to_lowercase();
     if key.len() != 64 || hex::decode(&key).is_err() {
         return Err(bad("Invalid public key"));
@@ -345,7 +363,7 @@ pub async fn authors(
     State(s): State<Arc<AppState>>,
     Json(b): Json<AuthorsReq>,
 ) -> Result<Json<serde_json::Value>, ApiErr> {
-    check_owner(&headers, &s)?;
+    importer(&headers, &s).await?;
     let mut out = serde_json::Map::new();
     for a in &b.authors {
         let from = format!("{}:{}", b.source, a.id);
@@ -402,7 +420,7 @@ pub async fn channel(
     State(s): State<Arc<AppState>>,
     Json(b): Json<ChannelReq>,
 ) -> Result<Json<serde_json::Value>, ApiErr> {
-    check_owner(&headers, &s)?;
+    importer(&headers, &s).await?;
     let from = format!("{}:{}", b.source, b.source_id);
     let Some((source, sid)) = split_from(&from) else { return Err(bad("Invalid source or id")) };
     let (source, sid) = (source.to_string(), sid.to_string());
@@ -484,7 +502,7 @@ pub async fn channel_applied(
     State(s): State<Arc<AppState>>,
     Json(b): Json<AppliedReq>,
 ) -> Result<Json<serde_json::Value>, ApiErr> {
-    check_owner(&headers, &s)?;
+    importer(&headers, &s).await?;
     sqlx::query("UPDATE imported_channels SET as_of_ms = ?, as_of_mtime = ?
                  WHERE source = ? AND source_id = ? AND (as_of_ms < ? OR (as_of_ms = ? AND as_of_mtime < ?))")
         .bind(b.as_of_ms).bind(b.as_of_mtime).bind(&b.source).bind(&b.source_id)
@@ -505,7 +523,7 @@ pub async fn existing(
     State(s): State<Arc<AppState>>,
     Json(b): Json<ExistingReq>,
 ) -> Result<Json<serde_json::Value>, ApiErr> {
-    check_owner(&headers, &s)?;
+    importer(&headers, &s).await?;
     if b.ids.len() > 5000 { return Err(bad("Too many ids at once")); }
     let mut found = Vec::new();
     let mut info = serde_json::Map::new();
@@ -582,7 +600,7 @@ pub async fn messages(
     State(s): State<Arc<AppState>>,
     Json(b): Json<MessagesReq>,
 ) -> Result<Json<serde_json::Value>, ApiErr> {
-    check_owner(&headers, &s)?;
+    importer(&headers, &s).await?;
     if b.messages.len() > MAX_BATCH { return Err(bad("Too many messages at once")); }
     let board_ok = sqlx::query("SELECT 1 FROM boards WHERE id = ?").bind(&b.board_id)
         .fetch_optional(&s.pool).await.map_err(|_| dberr())?.is_some();

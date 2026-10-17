@@ -111,6 +111,7 @@
   .av { width:32px; height:32px; border-radius:50%; display:flex; align-items:center; justify-content:center; font-weight:700; color:#fff; flex-shrink:0; }
   .name { color:var(--strong); font-weight:600; display:flex; align-items:center; gap:6px; }
   .crown { color:var(--yellow); }
+  .bot-tag { display:inline-block; margin-left:6px; padding:0 5px; border-radius:4px; background:#5865f2; color:#fff; font-size:10px; font-weight:700; line-height:16px; vertical-align:middle; letter-spacing:.3px; }
   .fp { font-family:Consolas,monospace; font-size:.75rem; color:var(--muted); }
   .dot { display:inline-block; width:8px; height:8px; border-radius:50%; margin-right:6px; background:var(--muted); }
   .dot.online { background:var(--green); } .dot.idle { background:var(--yellow); }
@@ -430,6 +431,15 @@
       </div>
       <p class="hint"><b>Kick</b> signs them out and removes them from the member list — like Discord, they can come back by
         joining again (with the join key, if you've set one). <b>Ban</b> does the same and blocks their account from ever joining again.</p>
+      <div class="card">
+        <h3 style="margin:0 0 6px">Bots</h3>
+        <p class="hint" style="margin-top:0">Bots are added from the app by members whose roles have <b>Manage Bots</b> (you always can), using the
+          bot's <i>Add to server</i> link. They never use the join key, an invite or this key. Kicking a bot here removes it.</p>
+        <label class="f" for="cfg-botcap">Most bots on this server</label>
+        <div class="row"><input type="number" id="cfg-botcap" min="0" max="1000" style="width:140px">
+          <button id="botcap-save">Save</button><span class="msg" id="botcap-msg"></span></div>
+        <p class="hint">25 to start with. Raise or lower it as you like; 0 stops any more being added. Bots already here stay.</p>
+      </div>
     </section>
 
     <!-- Roles -->
@@ -644,10 +654,11 @@ async function loadInfo() {
   $('cfg-name').value = info.server_name;
   $('cfg-desc').value = info.description || ''; updateDescCount();
   $('cfg-maxup').value = info.max_upload_mb;
+  if (info.bot_cap !== undefined) $('cfg-botcap').value = info.bot_cap;
   fillJoinChannels(info.join_channel);
   // (These exist once the page has finished setting up; on the first load
   // they take their starting point from the values filled in here.)
-  try { joinKeySaver.reset(); customSaver.reset(); uploadsSaver.reset(); } catch {}
+  try { joinKeySaver.reset(); customSaver.reset(); uploadsSaver.reset(); botCapSaver.reset(); } catch {}
   $('st-upload').textContent = info.max_upload_mb === 0 ? 'Unlimited' : info.max_upload_mb >= 1024 ? (info.max_upload_mb / 1024).toFixed(info.max_upload_mb % 1024 ? 1 : 0) + ' GB' : info.max_upload_mb + ' MB';
   $('bp-name').textContent = info.server_name;
   $('icon-demo-name').textContent = info.server_name;
@@ -946,6 +957,15 @@ const uploadsSaver = makeSaver({ btn: $('uploads-save'), msg: $('uploads-msg'), 
     await api('/api/admin/settings', { json: { max_upload_mb: mb } }); await loadInfo();
   } });
 
+// ── Bots ─────────────────────────────────────────────────────────────
+const botCapSaver = makeSaver({ btn: $('botcap-save'), msg: $('botcap-msg'), area: $('cfg-botcap').closest('.card'),
+  read: () => String(parseInt($('cfg-botcap').value, 10)),
+  save: async () => {
+    const n = parseInt($('cfg-botcap').value, 10);
+    if (!(n >= 0 && n <= 1000)) throw new Error('Choose between 0 and 1000');
+    await api('/api/admin/settings', { json: { bot_cap: n } }); await loadInfo();
+  } });
+
 // ── Channels ─────────────────────────────────────────────────────────
 // "Who can see this?" for a category or channel: Everyone, or only members
 // with one of the chosen roles (the owner and Administrators always can).
@@ -1132,13 +1152,13 @@ async function loadMembers() {
     const st = m.status === 'idle' ? 'Away' : m.status === 'invisible' ? 'Invisible' : m.status === 'online' ? 'Online' : 'Offline';
     tr.innerHTML = `
       <td><div class="who"><div class="av" style="background:${colour(m.username)}">${esc(m.username[0].toUpperCase())}</div>
-        <div><div class="name">${esc(m.username)}${m.is_owner ? `<span class="crown" title="Server owner">${icon('crown')}</span>` : ''}</div>
+        <div><div class="name">${esc(m.username)}${m.is_bot ? '<span class="bot-tag" title="A bot, added by a member with Manage Bots">BOT</span>' : ''}${m.is_owner ? `<span class="crown" title="Server owner">${icon('crown')}</span>` : ''}</div>
         <div class="fp" title="Account key fingerprint">${esc(m.fingerprint)}</div></div></div></td>
       <td class="mroles"></td>
       <td><span class="dot ${m.status === 'invisible' ? '' : m.status}"></span>${st}</td>
       <td>${fmtDate(m.joined_at)}</td>
       <td><div class="acts">
-        <button class="small ghost" data-crown>${icon('crown')}${m.is_owner ? 'Remove crown' : 'Make owner'}</button>
+        <button class="small ghost" data-crown${m.is_bot ? ' hidden' : ''}>${icon('crown')}${m.is_owner ? 'Remove crown' : 'Make owner'}</button>
         <button class="small ghost" data-kick>${icon('person_remove')}Kick</button>
         <button class="small danger" data-ban>${icon('block')}Ban</button></div></td>`;
     tr.querySelector('[data-crown]').onclick = async () => {

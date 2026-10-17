@@ -612,6 +612,16 @@ pub async fn post_message(
     if content.is_empty() && attachments.is_empty() {
         return Err((StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": "Must have content or attachment" }))));
     }
+    // Bots: at most 5 messages per 5 seconds in a channel, and never plain
+    // text in an encrypted one (bots.rs).
+    if crate::bots::is_bot_token(token_from(&headers)) {
+        if !crate::bots::allow_message(&username, &board_id) {
+            return Err((StatusCode::TOO_MANY_REQUESTS, Json(serde_json::json!({ "error": "Sending messages too quickly in this channel — slow down" }))));
+        }
+        if !content.is_empty() && !content.starts_with("e2ee:") && crate::channel_keys::latest_generation(&s.pool, &board_id).await > 0 {
+            return Err((StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": "This channel is end-to-end encrypted, so bots can't send unencrypted messages to it" }))));
+        }
+    }
 
     let id              = uuid::Uuid::now_v7().to_string();
     let now             = chrono::Utc::now().to_rfc3339();

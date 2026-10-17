@@ -27,6 +27,8 @@ pub struct AdminInfo {
     /// Where "… joined the server." messages go: a board id, "" = the first
     /// text channel (default), or "off".
     pub join_channel:      String,
+    /// The most bots the server takes (bots.rs).
+    pub bot_cap:           i64,
 }
 
 #[derive(Deserialize)]
@@ -36,6 +38,7 @@ pub struct UpdateSettingsReq {
     pub description:   Option<String>,
     pub max_upload_mb: Option<u64>,
     pub join_channel:  Option<String>,
+    pub bot_cap:       Option<i64>,
 }
 
 /// Upload size limit bounds for the setting (MB). 0 means unlimited.
@@ -157,6 +160,7 @@ pub async fn get_admin_info(
         banner_updated_at: banner_updated_at(&s.pool).await,
         icon_updated_at: icon_updated_at(&s.pool).await,
         join_channel: db::get_config(&s.pool, "join_channel").await.unwrap_or(None).unwrap_or_default(),
+        bot_cap: crate::bots::cap(&s.pool).await,
     }))
 }
 
@@ -191,6 +195,12 @@ pub async fn update_settings(
             return Err(bad(&format!("Upload limit must be between 1 and {MAX_UPLOAD_MB} MB, or 0 for unlimited")));
         }
         db::set_config(&s.pool, "max_upload_mb", &mb.to_string()).await.map_err(|_| dberr())?;
+    }
+    if let Some(cap) = body.bot_cap {
+        if !(0..=crate::bots::MAX_CAP).contains(&cap) {
+            return Err(bad(&format!("The bot limit is 0 to {}", crate::bots::MAX_CAP)));
+        }
+        db::set_config(&s.pool, "bot_cap", &cap.to_string()).await.map_err(|_| dberr())?;
     }
     if let Some(ch) = body.join_channel.as_deref().map(str::trim) {
         db::set_config(&s.pool, "join_channel", ch).await.map_err(|_| dberr())?;
@@ -677,7 +687,10 @@ pub async fn list_members(
     State(s): State<Arc<AppState>>,
 ) -> Result<Json<serde_json::Value>, ApiErr> {
     check_owner(&headers, &s)?;
-    let rows = sqlx::query("SELECT public_key, username, created_at FROM users ORDER BY username COLLATE NOCASE")
+    let rows = sqlx::query("SELECT u.public_key AS public_key, u.username AS username, u.created_at AS created_at,
+                                   b.maker_key AS maker_key
+                            FROM users u LEFT JOIN bots b ON b.public_key = u.public_key
+                            ORDER BY u.username COLLATE NOCASE")
         .fetch_all(&s.pool).await.map_err(|_| dberr())?;
     let owner = owner_username(&s.pool).await;
     let (online, presence) = {
@@ -693,8 +706,9 @@ pub async fn list_members(
         } else { "offline".into() };
         serde_json::json!({
             "username": username,
-            "fingerprint": pk.get(..16).unwrap_or(&pk),
+            "fingerprint": pk.get(..32).unwrap_or(&pk),
             "joined_at": r.get::<String, _>("created_at"),
+            "is_bot": r.try_get::<Option<String>, _>("maker_key").ok().flatten().is_some(),
             "status": status,
             "is_owner": owner.as_deref() == Some(username.as_str()),
         })
@@ -717,6 +731,7 @@ pub async fn set_owner(
         let exists = sqlx::query("SELECT 1 FROM users WHERE username = ?").bind(u)
             .fetch_optional(&s.pool).await.map_err(|_| dberr())?.is_some();
         if !exists { return Err(bad("No member with that username")); }
+        if crate::bots::is_bot(&s.pool, u).await { return Err(bad("A bot can't own the server")); }
     }
     db::set_config(&s.pool, "owner_username", name.as_deref().unwrap_or("")).await.map_err(|_| dberr())?;
     crate::ws::broadcast_users(&s);
@@ -774,6 +789,9 @@ pub(crate) async fn kick_user(s: &Arc<AppState>, username: &str, ban: bool, reas
     // Their open connections see this, pass it to the client, and close.
     // A kick takes their roles too (as on Discord); they rejoin with none.
     let _ = sqlx::query("DELETE FROM member_roles WHERE public_key = ?").bind(&public_key).execute(&s.pool).await;
+    // A bot that's kicked or banned is no longer added here: it needs adding
+    // again (bots.rs).
+    crate::bots::forget(&s.pool, &public_key).await;
     crate::ws::send_to_user(s, &username, serde_json::json!({
         "type": "kicked", "banned": body.ban, "reason": reason,
     }));
@@ -793,7 +811,7 @@ pub async fn list_bans(
     Ok(Json(serde_json::json!(rows.iter().map(|r| {
         let pk: String = r.get("public_key");
         serde_json::json!({
-            "public_key": pk, "fingerprint": pk.get(..16).unwrap_or(&pk),
+            "public_key": pk, "fingerprint": pk.get(..32).unwrap_or(&pk),
             "username": r.get::<String, _>("username"), "reason": r.get::<String, _>("reason"),
             "banned_at": r.get::<String, _>("banned_at"),
         })

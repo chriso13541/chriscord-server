@@ -160,7 +160,7 @@ async fn board_exists(pool: &SqlitePool, board_id: &str) -> bool {
         .fetch_optional(pool).await.ok().flatten().is_some()
 }
 
-async fn latest_generation(pool: &SqlitePool, board_id: &str) -> i64 {
+pub(crate) async fn latest_generation(pool: &SqlitePool, board_id: &str) -> i64 {
     sqlx::query("SELECT COALESCE(MAX(generation), 0) AS g FROM channel_keys WHERE board_id = ?")
         .bind(board_id).fetch_one(pool).await.map(|r| r.get::<i64, _>("g")).unwrap_or(0)
 }

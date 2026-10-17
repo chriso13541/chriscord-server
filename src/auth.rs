@@ -48,16 +48,26 @@ pub struct JoinReq {
     pub public_key: String,  // hex-encoded Ed25519 public key
     pub nonce:      String,  // the nonce we issued
     pub signature:  String,  // hex-encoded Ed25519 signature of nonce bytes
+    /// Bots only: the certificate from the bot's maker (bots.rs). A bot
+    /// always joins with it, and never with the join key or an invite.
+    #[serde(default)]
+    pub bot:        Option<crate::bots::BotCert>,
+    /// Bots only: what it is, e.g. "chriscord-musicbot/0.5.0".
+    #[serde(default)]
+    pub client:     Option<String>,
 }
 
 #[derive(Serialize)]
 pub struct JoinResp {
     pub token:       String,
     pub username:    String,
-    pub fingerprint: String, // first 16 hex chars of public key — display identity
+    pub fingerprint: String, // first 32 hex chars of public key — display identity
     /// Statuses travel as encrypted blobs ("presence" in ws.rs): the app
     /// sends no readable status here.
     pub encrypted_presence: bool,
+    /// Signed in as a bot (bots.rs).
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub bot: bool,
 }
 
 type ApiErr = (StatusCode, Json<serde_json::Value>);
@@ -167,6 +177,27 @@ pub async fn join(
         return Err(err(StatusCode::FORBIDDEN, "You are banned from this server"));
     }
 
+    // ── 4c. Bots ──────────────────────────────────────────────────────────────
+    // A bot comes in only with its certificate, and only once someone has
+    // added it here; a key that was added as a bot can't join without one.
+    let public_key = body.public_key.to_lowercase();
+    if let Some(cert) = &body.bot {
+        let name = crate::bots::join(&s, cert, &public_key, body.client.as_deref()).await?;
+        let token = utils::generate_hex(64);
+        sqlx::query("INSERT INTO sessions (token, username, public_key, created_at) VALUES (?, ?, ?, ?)")
+            .bind(&token).bind(&name).bind(&public_key).bind(chrono::Utc::now().to_rfc3339())
+            .execute(&s.pool).await
+            .map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "DB error"))?;
+        crate::bots::session_started(&token, &public_key);
+        return Ok(Json(JoinResp { token, username: name, fingerprint: public_key[..32].to_string(), encrypted_presence: true, bot: true }));
+    }
+    let is_bot_key = sqlx::query("SELECT 1 FROM bots WHERE public_key = ?").bind(&public_key)
+        .fetch_optional(&s.pool).await
+        .map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "DB error"))?.is_some();
+    if is_bot_key {
+        return Err(err(StatusCode::FORBIDDEN, "This key belongs to a bot here, so it has to join with its bot certificate"));
+    }
+
     // ── 5. Register or verify the user record (TOFU) ──────────────────────────
     // TOFU: first time this public key is seen, register it with the claimed username.
     // If the key is already known, verify the username matches.
@@ -261,7 +292,7 @@ pub async fn join(
     .await
     .map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "DB error"))?;
 
-    let fingerprint = body.public_key[..16].to_string();
+    let fingerprint = body.public_key[..32].to_string();
 
-    Ok(Json(JoinResp { token, username, fingerprint, encrypted_presence: true }))
+    Ok(Json(JoinResp { token, username, fingerprint, encrypted_presence: true, bot: false }))
 }

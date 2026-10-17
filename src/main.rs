@@ -1,4 +1,5 @@
 mod access;
+mod bots;
 mod channel_keys;
 mod admin;
 mod invites;
@@ -134,6 +135,7 @@ async fn main() {
     stickers::init(&pool).await.expect("Failed to set up stickers");
     channel_keys::init(&pool).await.expect("Failed to set up message encryption keys");
     imports::init(&pool).await.expect("Failed to set up imported history");
+    bots::init(&pool).await.expect("Failed to set up bots");
     hosting::init(&pool).await.expect("Failed to set up hosted servers");
     ws::init_moderation(&pool).await.expect("Failed to set up voice moderation");
     zips::clear_leftovers(); // "Download all" zips from before a restart
@@ -216,6 +218,10 @@ async fn main() {
         .route("/api/invites",          post(invites::create))
         .route("/invite/:code",         get(invites::landing))
         .route("/api/members/:username/kick", post(roles::kick_member))
+        // Bots (bots.rs).
+        .route("/api/bots",             get(bots::list).post(bots::add))
+        .route("/api/bots/revoke",      post(bots::revoke))
+        .route("/api/bots/:public_key", put(bots::update).delete(bots::remove))
         .route("/api/admin/bans",       get(admin::list_bans))
         .route("/api/admin/bans/:public_key", delete(admin::unban))
         .route("/api/server/banner",    get(admin::serve_banner))
@@ -278,6 +284,7 @@ async fn main() {
         .route("/api/admin/hosting/:id/stop",    post(hosting::stop))
         .route("/api/admin/hosting/:id/restart", post(hosting::restart))
         .route("/api/admin/hosting/:id/owner-key", get(hosting::owner_key))
+        .layer(axum::middleware::from_fn(bots::rate_limit)) // bots: 50 requests a second
         .layer(CorsLayer::permissive())
         .with_state(state);
 

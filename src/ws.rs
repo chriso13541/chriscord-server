@@ -100,6 +100,14 @@ async fn handle_socket(socket: WebSocket, token: String, initial_status: Option<
         Ok(Some(u)) => u,
         _ => return,
     };
+    // Bots: no new connection within a second of the last, and a limit on
+    // how much they send (bots.rs).
+    let is_bot = crate::bots::is_bot_token(&token);
+    if is_bot && crate::bots::connect_wait(&token).is_some() {
+        tracing::info!("ws: {username} (a bot) reconnected too quickly — refused");
+        return;
+    }
+    let mut bot_second = (std::time::Instant::now(), 0u32);
     // Where this account's picture/banner/bio are stored (by public key).
     let user_key = crate::pfp::storage_key_for(&state.pool, &username).await.unwrap_or_default();
     // Which channels this member can see (None = all). Worked out again
@@ -145,6 +153,21 @@ async fn handle_socket(socket: WebSocket, token: String, initial_status: Option<
                 if matches!(msg, Some(Ok(_))) { last_seen = std::time::Instant::now(); }
                 match msg {
                     Some(Ok(Message::Text(text))) => {
+                        if is_bot {
+                            if bot_second.0.elapsed() >= std::time::Duration::from_secs(1) { bot_second = (std::time::Instant::now(), 0); }
+                            bot_second.1 += 1;
+                            if bot_second.1 > crate::bots::REQ_DISCONNECT {
+                                tracing::info!("ws: {username} (a bot) sent far too much — disconnected");
+                                break;
+                            }
+                            if bot_second.1 > crate::bots::REQ_PER_SEC {
+                                if bot_second.1 == crate::bots::REQ_PER_SEC + 1 {
+                                    let notice = serde_json::json!({ "type": "rate_limited", "retry_after_ms": 1000 });
+                                    if sink.send(Message::Text(notice.to_string())).await.is_err() { break; }
+                                }
+                                continue;
+                            }
+                        }
                         let Ok(cm) = serde_json::from_str::<ClientMsg>(&text) else { continue };
                         match cm.msg_type.as_str() {
                             "subscribe" if cm.board_id.as_deref().map_or(false, |b| !sees(&visible, b)) => {}
@@ -171,7 +194,16 @@ async fn handle_socket(socket: WebSocket, token: String, initial_status: Option<
                                         else if perms & crate::roles::SEND_MESSAGES == 0 { Some("send messages") }
                                         else if !attachments.is_empty() && perms & crate::roles::ATTACH_FILES == 0 { Some("attach files") }
                                         else { None };
-                                    if let Some(what) = denied {
+                                    // Bots: at most 5 messages per 5 seconds in a channel, and
+                                    // never plain text in an encrypted channel.
+                                    let bot_refusal = if !is_bot || denied.is_some() { None }
+                                        else if !crate::bots::allow_message(&username, &bid) { Some("You're sending messages too quickly in this channel — slow down") }
+                                        else if !content.is_empty() && !content.starts_with("e2ee:") && crate::channel_keys::latest_generation(&state.pool, &bid).await > 0 {
+                                            Some("This channel is end-to-end encrypted, so bots can't send unencrypted messages to it")
+                                        } else { None };
+                                    if let Some(why) = bot_refusal {
+                                        send_to_user(&state, &username, serde_json::json!({ "type": "action_denied", "message": why, "board_id": bid }));
+                                    } else if let Some(what) = denied {
                                         send_to_user(&state, &username, serde_json::json!({
                                             "type": "action_denied", "message": format!("You don't have permission to {what} on this server"),
                                         }));
@@ -785,6 +817,8 @@ async fn handle_socket(socket: WebSocket, token: String, initial_status: Option<
                             }
                             let fwd = match v["type"].as_str() {
                                 Some("users") | Some("server_updated") | Some("server_restarting") => true,
+                                // Bots added, changed or removed (bots.rs): the app reloads its list.
+                                Some("bots_updated") => true,
                                 Some("typing") => v["username"].as_str() != Some(username.as_str()),
                                 Some("rooms_updated") => true,
                                 Some("voice_state") => true,
@@ -1169,6 +1203,8 @@ pub fn broadcast_users(state: &Arc<AppState>) {
         // the server nickname, else the global one, else the username.
         let mut nicknames = serde_json::Map::new();
         let mut global_nicknames = serde_json::Map::new();
+        // Who's a bot, and who made it (bots.rs): apps show a BOT tag.
+        let bots = crate::bots::tags(&state.pool).await;
         if let Ok(rows) = sqlx::query("SELECT username, public_key, nickname FROM users").fetch_all(&state.pool).await {
             for r in rows {
                 let user: String = r.get("username");
@@ -1185,7 +1221,7 @@ pub fn broadcast_users(state: &Arc<AppState>) {
         let _ = state.tx.send(serde_json::json!({
             "type": "users", "online": online, "presence": statuses, "all": all, "owner": owner,
             "activities": playing, "presence_blobs": blobs, "presence_devices": devices,
-            "nicknames": nicknames, "global_nicknames": global_nicknames,
+            "nicknames": nicknames, "global_nicknames": global_nicknames, "bots": bots,
         }).to_string());
     });
 }

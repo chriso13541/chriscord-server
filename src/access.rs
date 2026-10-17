@@ -46,6 +46,10 @@ pub struct Visible {
 }
 
 pub async fn visible_for(pool: &SqlitePool, username: &str) -> Option<Visible> {
+    // A bot sees only the channels it was given (bots.rs).
+    if let Some(v) = crate::bots::visible_for(pool, username).await {
+        return Some(v);
+    }
     if crate::roles::has(pool, username, crate::roles::ADMINISTRATOR).await {
         return None; // (true for the owner too — they have every permission)
     }
