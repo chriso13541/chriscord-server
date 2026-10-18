@@ -228,7 +228,7 @@ async fn supervise(id: String, name: String, port: u16, mut stop: tokio::sync::w
     tracing::info!("hosting: stopped \"{name}\"");
 }
 
-async fn terminate(child: &mut tokio::process::Child) {
+pub(crate) async fn terminate(child: &mut tokio::process::Child) {
     #[cfg(unix)]
     {
         if let Some(pid) = child.id() {

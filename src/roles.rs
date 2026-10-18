@@ -282,6 +282,9 @@ pub async fn kick_member(
     if body.ban { require(&s.pool, &username, BAN_MEMBERS, "ban members").await?; }
     else { require(&s.pool, &username, KICK_MEMBERS, "kick members").await?; }
     if target == username { return Err(bad("You can't remove yourself")); }
+    if crate::plugins::is_plugin_user(&s.pool, &target).await {
+        return Err(bad("That's one of the server's plugins — only the owner removes it, from the admin panel"));
+    }
     if top_position(&s.pool, &target).await >= top_position(&s.pool, &username).await {
         return Err((StatusCode::FORBIDDEN, Json(serde_json::json!({
             "error": format!("{target}'s highest role is the same as or above yours") }))));

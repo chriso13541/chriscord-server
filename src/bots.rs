@@ -116,7 +116,7 @@ pub fn valid_name(n: &str) -> bool {
 }
 
 impl BotCert {
-    fn message(&self) -> Vec<u8> {
+    pub(crate) fn message(&self) -> Vec<u8> {
         let created = self.created.to_string();
         sig_message("cert", &[self.bot_key.as_str(), self.name.as_str(), self.description.as_str(), self.maker_key.as_str(), created.as_str()])
     }
@@ -303,12 +303,14 @@ pub async fn visible_for(pool: &SqlitePool, username: &str) -> Option<Visible> {
 /// they're a member), name (its own), description}.
 pub async fn tags(pool: &SqlitePool) -> serde_json::Map<String, serde_json::Value> {
     sqlx::query("SELECT u.username AS username, b.maker_key AS maker_key, b.name AS name, b.description AS description,
-                        m.username AS maker
+                        m.username AS maker, EXISTS(SELECT 1 FROM plugins p WHERE p.bot_key = b.public_key) AS plugin
                  FROM bots b JOIN users u ON u.public_key = b.public_key LEFT JOIN users m ON m.public_key = b.maker_key")
         .fetch_all(pool).await.unwrap_or_default().iter().map(|r| (r.get::<String, _>("username"), serde_json::json!({
             "maker_key": r.get::<String, _>("maker_key"), "name": r.get::<String, _>("name"),
             "description": r.get::<String, _>("description"),
             "maker": r.try_get::<Option<String>, _>("maker").ok().flatten().unwrap_or_default(),
+            // A plugin this server runs (plugins.rs): the app says so.
+            "plugin": r.try_get::<i64, _>("plugin").unwrap_or(0) != 0,
         }))).collect()
 }
 
@@ -402,7 +404,7 @@ async fn grantable(pool: &SqlitePool, user: &str) -> u64 {
     p
 }
 
-fn changed(s: &Arc<AppState>) {
+pub(crate) fn changed(s: &Arc<AppState>) {
     crate::ws::broadcast_users(s);
     // Connections work out again what each can see (and the apps share or
     // rotate channel keys to match).
@@ -421,7 +423,8 @@ pub async fn list(headers: HeaderMap, State(s): State<Arc<AppState>>) -> Result<
     let rows = sqlx::query(
         "SELECT b.public_key AS public_key, u.username AS username, b.maker_key AS maker_key, b.name AS name,
                 b.description AS description, b.permissions AS permissions, b.added_by AS added_by,
-                b.added_at AS added_at, b.client AS client, m.username AS maker
+                b.added_at AS added_at, b.client AS client, m.username AS maker,
+                EXISTS(SELECT 1 FROM plugins p WHERE p.bot_key = b.public_key) AS plugin
          FROM bots b JOIN users u ON u.public_key = b.public_key LEFT JOIN users m ON m.public_key = b.maker_key
          ORDER BY u.username COLLATE NOCASE",
     ).fetch_all(&s.pool).await.map_err(|_| dberr())?;
@@ -440,6 +443,7 @@ pub async fn list(headers: HeaderMap, State(s): State<Arc<AppState>>) -> Result<
             "channels": shown, "hidden_channels": hidden.len(),
             "added_by": r.get::<String, _>("added_by"), "added_at": r.get::<String, _>("added_at"),
             "client": r.get::<String, _>("client"), "online": online.contains(&username),
+            "plugin": r.try_get::<i64, _>("plugin").unwrap_or(0) != 0,
         }));
     }
     let can_manage = !is_bot(&s.pool, &user).await && roles::has(&s.pool, &user, roles::MANAGE_BOTS).await;
@@ -579,6 +583,9 @@ pub async fn remove(headers: HeaderMap, Path(key): Path<String>, State(s): State
     let user = manager(&headers, &s).await?;
     let key = key.to_lowercase();
     if !is_bot_key(&s.pool, &key).await { return Err(err(StatusCode::NOT_FOUND, "No such bot here")); }
+    if crate::plugins::is_plugin_key(&s.pool, &key).await {
+        return Err(bad("This is one of the server's plugins — the owner removes it from the admin panel (Plugins)"));
+    }
     let name = username_of_key(&s.pool, &key).await;
     match name {
         Some(n) => crate::admin::kick_user(&s, &n, false, "Removed from the server").await?,

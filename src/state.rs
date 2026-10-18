@@ -52,4 +52,6 @@ pub struct AppState {
     pub zips: crate::zips::Zips,
     /// Other servers this one runs on the same machine (hosting.rs).
     pub hosting: crate::hosting::Hosting,
+    /// The plugins this server runs (plugins.rs).
+    pub plugins: crate::plugins::Plugins,
 }

@@ -16,6 +16,8 @@ mod pfp;
 mod profile;
 mod preview;
 mod rooms;
+mod plugins;
+mod tarfile;
 mod search_sync;
 mod state;
 mod utils;
@@ -137,6 +139,7 @@ async fn main() {
     channel_keys::init(&pool).await.expect("Failed to set up message encryption keys");
     imports::init(&pool).await.expect("Failed to set up imported history");
     bots::init(&pool).await.expect("Failed to set up bots");
+    plugins::init(&pool).await.expect("Failed to set up plugins");
     search_sync::init(&pool).await.expect("Failed to set up search");
     hosting::init(&pool).await.expect("Failed to set up hosted servers");
     ws::init_moderation(&pool).await.expect("Failed to set up voice moderation");
@@ -165,6 +168,7 @@ async fn main() {
         file_links: Mutex::new(HashMap::new()),
         zips: zips::Zips::new(),
         hosting: hosting::Hosting::new(),
+        plugins: plugins::Plugins::new(),
     });
     let state_for_shutdown = state.clone();
     let port = utils::port();
@@ -288,6 +292,16 @@ async fn main() {
         .route("/api/admin/hosting/:id/stop",    post(hosting::stop))
         .route("/api/admin/hosting/:id/restart", post(hosting::restart))
         .route("/api/admin/hosting/:id/owner-key", get(hosting::owner_key))
+        // Plugins this server runs (plugins.rs).
+        .route("/api/admin/plugins",           get(plugins::list))
+        .route("/api/admin/plugins/upload",    post(plugins::upload)
+            .layer(DefaultBodyLimit::max(plugins::MAX_UPLOAD)))
+        .route("/api/admin/plugins/install",   post(plugins::install))
+        .route("/api/admin/plugins/:id",       put(plugins::update).delete(plugins::remove))
+        .route("/api/admin/plugins/:id/start",   post(plugins::start))
+        .route("/api/admin/plugins/:id/stop",    post(plugins::stop))
+        .route("/api/admin/plugins/:id/restart", post(plugins::restart))
+        .route("/api/admin/plugins/:id/logs",    get(plugins::logs))
         .layer(axum::middleware::from_fn(bots::rate_limit)) // bots: 50 requests a second
         .layer(CorsLayer::permissive())
         .with_state(state);
@@ -298,6 +312,8 @@ async fn main() {
     tracing::info!("chriscord-server listening on 0.0.0.0:{port}");
     // Any other servers this one hosts.
     hosting::start_all(&state_for_shutdown).await;
+    // And its plugins.
+    plugins::start_all(state_for_shutdown.clone());
 
     // Stop cleanly on Ctrl+C or SIGTERM (`systemctl stop/restart`): tell the
     // apps it's a restart (they reconnect on their own, and rejoin calls),
@@ -311,6 +327,7 @@ async fn main() {
             let _ = shutdown_state.tx.send(serde_json::json!({ "type": "server_restarting" }).to_string());
             tokio::time::sleep(std::time::Duration::from_millis(300)).await; // let that notice go out
             shutdown_state.hosting.stop_all().await; // servers this one hosts stop with it
+            shutdown_state.plugins.stop_all().await;  // and its plugins
             shutdown_state.pool.close().await;
         }
     }

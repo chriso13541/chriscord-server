@@ -762,6 +762,9 @@ pub async fn kick_member(
     Json(body): Json<KickReq>,
 ) -> Result<Json<serde_json::Value>, ApiErr> {
     check_owner(&headers, &s)?;
+    if crate::plugins::is_plugin_user(&s.pool, &username).await {
+        return Err(bad("This is one of the server's plugins — remove it in Plugins instead"));
+    }
     kick_user(&s, &username, body.ban, &body.reason).await?;
     tracing::info!("admin: {} {username}", if body.ban { "banned" } else { "kicked" });
     Ok(Json(serde_json::json!({ "ok": true })))
