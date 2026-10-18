@@ -209,6 +209,7 @@ pub async fn make_way_for(s: &AppState, username: &str) {
             .bind(&new).bind(&source).bind(&id).execute(&s.pool).await;
         let _ = sqlx::query("UPDATE messages SET username = ? WHERE imported_from = ? AND username = ?")
             .bind(&new).bind(&from).bind(&old).execute(&s.pool).await;
+        crate::search_sync::note(&s.pool, crate::search_sync::Change::Author { imported_from: &from, username: &new }).await;
         tracing::info!("import: {old} (imported) is now shown as {new} — a member joined as {username}");
         history_changed(s, None);
     }
@@ -716,6 +717,7 @@ pub async fn messages(
     }
     if inserted > 0 || updated > 0 {
         tracing::info!("import: {inserted} new and {updated} updated message(s) in board {}", b.board_id);
+        crate::search_sync::note(&s.pool, crate::search_sync::Change::Board { board: &b.board_id }).await;
         history_changed(&s, Some(b.board_id.as_str()));
     }
     Ok(Json(serde_json::json!({ "ok": true, "inserted": inserted, "updated": updated })))
@@ -845,6 +847,7 @@ pub async fn admin_link(
         .bind(&source).bind(&id).execute(&mut *tx).await.map_err(|_| dberr())?;
     tx.commit().await.map_err(|_| dberr())?;
     tracing::info!("import: {from} linked to {username} ({moved} message(s))");
+    crate::search_sync::note(&s.pool, crate::search_sync::Change::Author { imported_from: &from, username: &username }).await;
     history_changed(&s, None);
     Ok(Json(serde_json::json!({ "ok": true, "messages": moved })))
 }
@@ -874,6 +877,7 @@ pub async fn admin_unlink(
         .bind(&placeholder).bind(&from).execute(&mut *tx).await.map_err(|_| dberr())?;
     tx.commit().await.map_err(|_| dberr())?;
     tracing::info!("import: {from} unlinked (shown as {placeholder} again)");
+    crate::search_sync::note(&s.pool, crate::search_sync::Change::Author { imported_from: &from, username: &placeholder }).await;
     history_changed(&s, None);
     Ok(Json(serde_json::json!({ "ok": true })))
 }

@@ -298,6 +298,7 @@ pub async fn delete_room(
 
     for bid in &board_ids {
         sqlx::query("DELETE FROM messages WHERE board_id = ?").bind(bid).execute(&s.pool).await.ok();
+        crate::search_sync::note(&s.pool, crate::search_sync::Change::BoardGone { board: bid }).await;
     }
     sqlx::query("DELETE FROM boards WHERE room_id = ?").bind(&id).execute(&s.pool).await.ok();
     sqlx::query("DELETE FROM rooms WHERE id = ?").bind(&id).execute(&s.pool).await.ok();
@@ -361,6 +362,7 @@ pub async fn delete_board(
     check_owner(&headers, &s)?;
 
     sqlx::query("DELETE FROM messages WHERE board_id = ?").bind(&id).execute(&s.pool).await.ok();
+    crate::search_sync::note(&s.pool, crate::search_sync::Change::BoardGone { board: &id }).await;
     sqlx::query("DELETE FROM boards WHERE id = ?").bind(&id).execute(&s.pool).await.ok();
 
     let _ = s.tx.send(serde_json::json!({ "type": "rooms_updated" }).to_string());

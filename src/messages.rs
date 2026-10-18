@@ -239,14 +239,14 @@ const SELECT: &str =
 
 // Same columns as SELECT above, plus the joined board's name and room —
 // used only by search_messages, which spans every board.
-const SEARCH_SELECT: &str =
+pub(crate) const SEARCH_SELECT: &str =
     "SELECT m.id, m.board_id, m.username, m.content,
             m.attachment_url, m.attachment_name, m.attachment_mime,
             m.attachments, m.edited, m.created_at, m.pinned_at, m.reply_to, m.kind, m.imported_from,
             b.name AS board_name, b.room_id AS room_id
      FROM messages m JOIN boards b ON m.board_id = b.id";
 
-fn row_to_search_result(r: &sqlx::sqlite::SqliteRow) -> SearchResult {
+pub(crate) fn row_to_search_result(r: &sqlx::sqlite::SqliteRow) -> SearchResult {
     SearchResult {
         message:    row_to_msg(r),
         board_name: r.get("board_name"),
@@ -465,6 +465,15 @@ pub struct ScanQuery {
     pub before: Option<String>,
     /// Carry on from here: only messages older than this id (UUIDv7).
     pub cursor: Option<String>,
+    /// Instead: only messages newer than this id, oldest first (bringing a
+    /// copy up to date). `next` is then the newest id on the page.
+    pub since: Option<String>,
+    /// "1": also say how many messages these filters cover in all
+    /// (`total`, ignoring cursor/since), for showing how far a search got.
+    pub count: Option<String>,
+    /// Just these messages (comma-separated ids, at most SCAN_MAX): the app
+    /// showing matches it found in its own copy of the history.
+    pub ids: Option<String>,
     pub limit: Option<i64>,
 }
 
@@ -510,22 +519,43 @@ pub async fn search_scan(
         wheres.push("julianday(m.created_at) < julianday(?)".into());
         binds.push(before.to_string());
     }
-    if let Some(cursor) = q.cursor.as_deref().filter(|c| !c.is_empty()) {
-        wheres.push("m.id < ?".into());
-        binds.push(cursor.to_string());
-    }
     // Only channels you can see.
     if let Some(v) = crate::access::visible_for(&s.pool, &username).await {
         if v.boards.is_empty() {
-            return Ok(Json(serde_json::json!({ "messages": [], "next": null })));
+            return Ok(Json(serde_json::json!({ "messages": [], "next": null, "total": 0 })));
         }
         wheres.push(format!("m.board_id IN ({})", vec!["?"; v.boards.len()].join(",")));
         binds.extend(v.boards.into_iter());
     }
+    // How many there are in all, before narrowing down to this page.
+    let total: Option<i64> = if q.count.as_deref() == Some("1") {
+        let where_sql = if wheres.is_empty() { String::new() } else { format!(" WHERE {}", wheres.join(" AND ")) };
+        let sql = format!("SELECT COUNT(*) AS n FROM messages m{where_sql}");
+        let mut query = sqlx::query(&sql);
+        for b in &binds { query = query.bind(b); }
+        query.fetch_one(&s.pool).await.ok().map(|r| r.get::<i64, _>("n"))
+    } else {
+        None
+    };
+    let since = q.since.as_deref().filter(|c| !c.is_empty());
+    if let Some(since) = since {
+        wheres.push("m.id > ?".into());
+        binds.push(since.to_string());
+    } else if let Some(cursor) = q.cursor.as_deref().filter(|c| !c.is_empty()) {
+        wheres.push("m.id < ?".into());
+        binds.push(cursor.to_string());
+    }
+    let ids: Vec<&str> = q.ids.as_deref().unwrap_or("").split(',').map(str::trim)
+        .filter(|i| !i.is_empty()).take(SCAN_MAX as usize).collect();
+    if !ids.is_empty() {
+        wheres.push(format!("m.id IN ({})", vec!["?"; ids.len()].join(",")));
+        binds.extend(ids.iter().map(|i| i.to_string()));
+    }
 
     let limit = q.limit.unwrap_or(SCAN_DEFAULT).clamp(1, SCAN_MAX);
+    let order = if since.is_some() { "ASC" } else { "DESC" };
     let where_sql = if wheres.is_empty() { String::new() } else { format!(" WHERE {}", wheres.join(" AND ")) };
-    let sql = format!("{}{} ORDER BY m.id DESC LIMIT {limit}", SEARCH_SELECT, where_sql);
+    let sql = format!("{}{} ORDER BY m.id {order} LIMIT {limit}", SEARCH_SELECT, where_sql);
     let mut query = sqlx::query(&sql);
     for b in &binds {
         query = query.bind(b);
@@ -536,7 +566,9 @@ pub async fn search_scan(
     })?;
     let messages: Vec<SearchResult> = rows.iter().map(row_to_search_result).collect();
     let next = if messages.len() as i64 == limit { messages.last().map(|m| m.message.id.clone()) } else { None };
-    Ok(Json(serde_json::json!({ "messages": messages, "next": next })))
+    let mut out = serde_json::json!({ "messages": messages, "next": next });
+    if let Some(t) = total { out["total"] = t.into(); }
+    Ok(Json(out))
 }
 
 /// Turns typed text into an FTS5 query: every word must appear (in any
@@ -677,6 +709,7 @@ pub async fn edit_message(
 
     sqlx::query("UPDATE messages SET content = ?, edited = 1 WHERE id = ?")
         .bind(&content).bind(&id).execute(&s.pool).await.map_err(|_| db_err())?;
+    crate::search_sync::note(&s.pool, crate::search_sync::Change::Edit { id: &id, board: &board_id }).await;
 
     let _ = s.tx.send(serde_json::json!({
         "type": "message_edit", "id": id, "board_id": board_id, "content": content,
@@ -706,6 +739,7 @@ pub async fn delete_message(
     let _ = sqlx::query("INSERT OR IGNORE INTO imported_deleted (id, deleted_at) SELECT id, ? FROM messages WHERE id = ? AND imported_from IS NOT NULL")
         .bind(chrono::Utc::now().to_rfc3339()).bind(&id).execute(&s.pool).await;
     sqlx::query("DELETE FROM messages WHERE id = ?").bind(&id).execute(&s.pool).await.map_err(|_| db_err())?;
+    crate::search_sync::note(&s.pool, crate::search_sync::Change::Delete { id: &id, board: &board_id }).await;
     let _ = sqlx::query("DELETE FROM reactions WHERE message_id = ?").bind(&id).execute(&s.pool).await;
     let _ = sqlx::query("DELETE FROM imported_reactions WHERE message_id = ?").bind(&id).execute(&s.pool).await;
 

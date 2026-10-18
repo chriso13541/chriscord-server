@@ -16,6 +16,7 @@ mod pfp;
 mod profile;
 mod preview;
 mod rooms;
+mod search_sync;
 mod state;
 mod utils;
 mod voice;
@@ -136,6 +137,7 @@ async fn main() {
     channel_keys::init(&pool).await.expect("Failed to set up message encryption keys");
     imports::init(&pool).await.expect("Failed to set up imported history");
     bots::init(&pool).await.expect("Failed to set up bots");
+    search_sync::init(&pool).await.expect("Failed to set up search");
     hosting::init(&pool).await.expect("Failed to set up hosted servers");
     ws::init_moderation(&pool).await.expect("Failed to set up voice moderation");
     zips::clear_leftovers(); // "Download all" zips from before a restart
@@ -242,6 +244,8 @@ async fn main() {
         .route("/api/boards/:id/messages/around/:message_id", get(messages::get_messages_around))
         .route("/api/search", get(messages::search_messages))
         .route("/api/search/scan", get(messages::search_scan)) // encrypted messages: the app matches
+        .route("/api/search/changes", get(search_sync::changes)) // keeping the app's copy up to date
+        .route("/api/search/authors", get(search_sync::authors)) // everyone who ever wrote, for from:
         .route("/api/messages/:id",
             patch(messages::edit_message).delete(messages::delete_message))
         .route("/api/boards/:id/pins",   get(messages::get_pins))
