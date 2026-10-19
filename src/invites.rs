@@ -23,8 +23,16 @@ use crate::{db, state::AppState};
 
 type ApiErr = (StatusCode, Json<serde_json::Value>);
 
-/// How long an invite link works.
+/// How long an invite link works (unless asked for longer, up to a week:
+/// the app's signed invites, roster.go, choose their own).
 pub const INVITE_TTL_MINUTES: i64 = 10;
+pub const INVITE_MAX_MINUTES: i64 = 7 * 24 * 60;
+
+#[derive(serde::Deserialize)]
+pub struct CreateReq {
+    #[serde(default)]
+    minutes: Option<i64>,
+}
 
 pub async fn init(pool: &SqlitePool) -> Result<(), sqlx::Error> {
     sqlx::query(
@@ -62,7 +70,8 @@ pub async fn record_use(pool: &SqlitePool, code: &str) {
 
 /// POST /api/invites — make an invite. Returns {code, expires_at, minutes};
 /// the app builds the full link from the server address it's connected to.
-pub async fn create(headers: HeaderMap, State(s): State<Arc<AppState>>) -> Result<Json<serde_json::Value>, ApiErr> {
+pub async fn create(headers: HeaderMap, State(s): State<Arc<AppState>>, body: Option<Json<CreateReq>>) -> Result<Json<serde_json::Value>, ApiErr> {
+    let minutes = body.and_then(|b| b.0.minutes).unwrap_or(INVITE_TTL_MINUTES).clamp(1, INVITE_MAX_MINUTES);
     let token = headers.get("X-Session-Token").and_then(|v| v.to_str().ok()).unwrap_or("");
     let username = db::verify_token(&s.pool, token).await
         .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({ "error": "DB error" }))))?
@@ -70,7 +79,7 @@ pub async fn create(headers: HeaderMap, State(s): State<Arc<AppState>>) -> Resul
     crate::roles::require(&s.pool, &username, crate::roles::CREATE_INVITE, "create invite links").await?;
 
     let now = chrono::Utc::now();
-    let expires = now + chrono::Duration::minutes(INVITE_TTL_MINUTES);
+    let expires = now + chrono::Duration::minutes(minutes);
     // Tidy up expired ones while we're here.
     let _ = sqlx::query("DELETE FROM invites WHERE expires_at <= ?").bind(now.to_rfc3339()).execute(&s.pool).await;
     let code = new_code();
@@ -79,7 +88,7 @@ pub async fn create(headers: HeaderMap, State(s): State<Arc<AppState>>) -> Resul
         .execute(&s.pool).await
         .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({ "error": "DB error" }))))?;
     tracing::info!("invites: {username} made an invite (expires {})", expires.to_rfc3339());
-    Ok(Json(serde_json::json!({ "code": code, "expires_at": expires.to_rfc3339(), "minutes": INVITE_TTL_MINUTES })))
+    Ok(Json(serde_json::json!({ "code": code, "expires_at": expires.to_rfc3339(), "minutes": minutes })))
 }
 
 /// GET /invite/:code — what someone sees opening the link in a browser.

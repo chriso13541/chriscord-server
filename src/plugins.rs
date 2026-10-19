@@ -38,6 +38,8 @@
 //       "linux-aarch64": ["bin/music-linux-arm64"]
 //     },
 //     "permissions": ["send_messages", "connect", "speak"],   what it asks for
+//     "internet": true,                    whether it needs web sites (else, in
+//                                          the sandbox, only this server and DNS)
 //     "channels": "Pick the text channels for its commands and the voice
 //                  channels it may play in.",   why it wants channels ("" = none)
 //     "settings": [ { "key": "prefix", "label": "Command prefix",
@@ -180,6 +182,62 @@ pub struct Manifest {
     pub channels: String,
     #[serde(default)]
     pub settings: Vec<Setting>,
+    /// Whether it needs the internet (web sites: TCP ports 80 and 443). In
+    /// the sandbox it may otherwise only connect to this server (and DNS).
+    #[serde(default)]
+    pub internet: bool,
+    /// Whether it takes end-to-end encrypted lanes (the app's lane.go): its
+    /// commands, clicks, answers and panel then pass through this server
+    /// sealed, between each member's app and the plugin.
+    #[serde(default)]
+    pub lanes: bool,
+    /// Commands members type in the message box: "music::play <song>".
+    #[serde(default)]
+    pub commands: Vec<Command>,
+    /// Whether it shows a panel in the app's plugins area, and how.
+    #[serde(default)]
+    pub panel: Option<PanelInfo>,
+}
+
+#[derive(Deserialize, Serialize, Clone)]
+pub struct Command {
+    pub name: String,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub args: Vec<Arg>,
+}
+
+/// One of a command's arguments, typed after it in order (the last text
+/// one takes the rest of the line).
+#[derive(Deserialize, Serialize, Clone)]
+pub struct Arg {
+    pub name: String,
+    #[serde(default)]
+    pub description: String,
+    /// "text", "number" or "choice"
+    #[serde(rename = "type", default = "text_kind")]
+    pub kind: String,
+    #[serde(default)]
+    pub required: bool,
+    #[serde(default)]
+    pub choices: Vec<String>,
+}
+
+#[derive(Deserialize, Serialize, Clone, Default)]
+pub struct PanelInfo {
+    /// Its title in the plugins area (default: the plugin's name).
+    #[serde(default)]
+    pub title: String,
+    /// A Material Symbols icon name, e.g. "music_note".
+    #[serde(default)]
+    pub icon: String,
+}
+
+/// A command's or argument's name: a-z, 0-9, - and _, 1–32, starting with a letter.
+fn valid_word(w: &str) -> bool {
+    (1..=32).contains(&w.len()) && w.starts_with(|c: char| c.is_ascii_lowercase())
+        && w.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_')
 }
 
 fn valid_id(id: &str) -> bool {
@@ -228,6 +286,30 @@ impl Manifest {
             }
             if !matches!(s.kind.as_str(), "text" | "number" | "bool" | "choice") {
                 return Err(format!("The plugin's setting \"{}\" has an unknown type", s.key));
+            }
+        }
+        if self.commands.len() > 50 {
+            return Err("A plugin can have up to 50 commands".into());
+        }
+        let mut names = HashSet::new();
+        for c in &self.commands {
+            if !valid_word(&c.name) || !names.insert(c.name.clone()) {
+                return Err(format!("The plugin has a command with a bad or repeated name: \"{}\"", c.name));
+            }
+            if c.description.chars().count() > 200 || c.args.len() > 8 {
+                return Err(format!("The plugin's command \"{}\" has too long a description or too many arguments", c.name));
+            }
+            let mut args = HashSet::new();
+            for a in &c.args {
+                if !valid_word(&a.name) || !args.insert(a.name.clone()) || a.description.chars().count() > 200
+                    || !matches!(a.kind.as_str(), "text" | "number" | "choice") || a.choices.len() > 25 {
+                    return Err(format!("The plugin's command \"{}\" has a bad argument \"{}\"", c.name, a.name));
+                }
+            }
+        }
+        if let Some(p) = &self.panel {
+            if p.title.chars().count() > 32 || p.icon.len() > 40 || !p.icon.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_') {
+                return Err("The plugin's panel has too long a title or a bad icon name".into());
             }
         }
         Ok(())
@@ -318,6 +400,8 @@ pub async fn init(pool: &SqlitePool) -> Result<(), sqlx::Error> {
             updated_at   TEXT NOT NULL
         )",
     ).execute(pool).await?;
+    // Whether the owner let it use the internet (when it asked to).
+    let _ = sqlx::query("ALTER TABLE plugins ADD COLUMN internet INTEGER NOT NULL DEFAULT 0").execute(pool).await;
     // Uploads that were never installed (the server restarted meanwhile).
     let _ = std::fs::remove_dir_all(staging_dir());
     Ok(())
@@ -341,12 +425,14 @@ struct Installed {
     cert:     String,
     settings: serde_json::Map<String, serde_json::Value>,
     enabled:  bool,
+    /// Allowed the internet (it also has to ask for it).
+    internet: bool,
     installed_at: String,
     updated_at:   String,
 }
 
 async fn load(pool: &SqlitePool, id: &str) -> Result<Option<Installed>, ApiErr> {
-    let Some(r) = sqlx::query("SELECT manifest, bot_key, seed, cert, settings, enabled, installed_at, updated_at FROM plugins WHERE id = ?")
+    let Some(r) = sqlx::query("SELECT manifest, bot_key, seed, cert, settings, enabled, internet, installed_at, updated_at FROM plugins WHERE id = ?")
         .bind(id).fetch_optional(pool).await.map_err(|_| dberr())? else { return Ok(None) };
     let manifest: Manifest = serde_json::from_str(&r.get::<String, _>("manifest")).map_err(|_| dberr())?;
     let settings = serde_json::from_str::<serde_json::Value>(&r.get::<String, _>("settings")).ok()
@@ -354,6 +440,7 @@ async fn load(pool: &SqlitePool, id: &str) -> Result<Option<Installed>, ApiErr> 
     Ok(Some(Installed {
         manifest, bot_key: r.get("bot_key"), seed: r.get("seed"), cert: r.get("cert"), settings,
         enabled: r.get::<i64, _>("enabled") != 0,
+        internet: r.try_get::<i64, _>("internet").unwrap_or(0) != 0,
         installed_at: r.get("installed_at"), updated_at: r.get("updated_at"),
     }))
 }
@@ -412,6 +499,9 @@ pub struct Status {
     pid:      Option<u32>,
     since:    String,
     restarts: u32,
+    /// Whether it's running in the sandbox (sandbox.rs), and if not, why.
+    sandboxed: bool,
+    sandbox_note: String,
 }
 
 struct Running {
@@ -434,6 +524,21 @@ pub struct Plugins {
     running: Mutex<HashMap<String, Running>>,
     logs:    Mutex<HashMap<String, Arc<Mutex<VecDeque<String>>>>>,
     staged:  Mutex<HashMap<String, Staged>>,
+    /// What each plugin shows in the app: plugin id → (the channel it's
+    /// about, "" for everyone) → its panel.
+    panels:  Mutex<HashMap<String, HashMap<String, serde_json::Value>>>,
+    /// Commands and clicks passed to plugins, so their answers reach the
+    /// member who sent them.
+    pending: Mutex<HashMap<String, Pending>>,
+    /// How much each member has asked of plugins lately.
+    asked:   Mutex<HashMap<String, (Instant, u32)>>,
+}
+
+struct Pending {
+    user:   String,
+    plugin: String,
+    board:  Option<String>,
+    at:     Instant,
 }
 
 /// What it takes to start one.
@@ -446,6 +551,8 @@ struct Launch {
     data:     PathBuf,
     url:      String,
     hello:    String,
+    /// The TCP ports it may connect to in the sandbox.
+    tcp:      Vec<u16>,
 }
 
 impl Plugins {
@@ -529,21 +636,53 @@ async fn supervise(l: Launch, mut stop: tokio::sync::watch::Receiver<bool>, stat
             set_failed(&status, &log, format!("can't make {}: {e}", l.data.display()));
             return;
         }
-        let child = tokio::process::Command::new(&l.program)
-            .args(&l.args)
+        let tmp = crate::sandbox::temp_dir(&l.data);
+        let _ = std::fs::create_dir_all(&tmp);
+        let mut cmd = tokio::process::Command::new(&l.program);
+        cmd.args(&l.args)
             .current_dir(&l.data)
+            // Only what it needs from the server's environment (nothing the
+            // server was given in confidence), and its own folder as home.
+            .env_clear()
+            .envs(std::env::vars().filter(|(k, _)| PASS_ENV.contains(&k.as_str()) || k.starts_with("LC_")))
+            .env("HOME", &l.data)
+            .env("TMPDIR", &tmp)
+            .env("XDG_CACHE_HOME", l.data.join(".cache"))
+            .env("XDG_CONFIG_HOME", l.data.join(".config"))
+            .env("XDG_DATA_HOME", l.data.join(".local/share"))
             .env("CHRISCORD_PLUGIN", "1")
             .env("CHRISCORD_PLUGIN_ID", &l.id)
             .env("CHRISCORD_URL", &l.url)
             .env("CHRISCORD_PLUGIN_DIR", &l.code)
             .env("CHRISCORD_PLUGIN_DATA", &l.data)
-            .env_remove("CHRISCORD_HOSTED")
-            .env_remove("CHRISCORD_DATA_DIR")
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
-            .kill_on_drop(true)
-            .spawn();
+            .kill_on_drop(true);
+        // Into the sandbox, where there is one (else it runs as before, and
+        // the panel says so).
+        let sandbox = if sandbox_off() {
+            Err("the sandbox is turned off (CHRISCORD_PLUGIN_SANDBOX=off)".to_string())
+        } else {
+            crate::sandbox::prepare(&l.code, &l.data, &root(), Some(&l.tcp))
+        };
+        let sandbox_note = match &sandbox {
+            Ok(sb) => {
+                #[cfg(unix)]
+                {
+                    let fd = sb.raw();
+                    // SAFETY: enter only makes system calls (no allocation or
+                    // locks), as is required between fork and exec.
+                    unsafe { cmd.pre_exec(move || crate::sandbox::enter(fd)); }
+                }
+                #[cfg(not(unix))]
+                let _ = sb;
+                String::new()
+            }
+            Err(why) => why.clone(),
+        };
+        let child = cmd.spawn();
+        drop(sandbox); // the child has its own copy of the ruleset
         let mut child = match child {
             Ok(c) => c,
             Err(e) => {
@@ -553,12 +692,18 @@ async fn supervise(l: Launch, mut stop: tokio::sync::watch::Receiver<bool>, stat
         };
         let pid = child.id();
         tracing::info!("plugins: started {} (pid {})", l.name, pid.unwrap_or(0));
-        push_log(&log, format!("[chriscord] started (pid {})", pid.unwrap_or(0)));
+        push_log(&log, if sandbox_note.is_empty() {
+            format!("[chriscord] started in the sandbox (pid {})", pid.unwrap_or(0))
+        } else {
+            format!("[chriscord] started (pid {}) — NOT sandboxed: {sandbox_note}", pid.unwrap_or(0))
+        });
         {
             let mut st = status.lock().unwrap();
             st.state = "running".into();
             st.pid = pid;
             st.since = now();
+            st.sandboxed = sandbox_note.is_empty();
+            st.sandbox_note = sandbox_note.clone();
         }
         // Its identity and settings, privately, then nothing more.
         if let Some(mut stdin) = child.stdin.take() {
@@ -615,6 +760,16 @@ async fn supervise(l: Launch, mut stop: tokio::sync::watch::Receiver<bool>, stat
     tracing::info!("plugins: stopped {}", l.name);
 }
 
+/// What a plugin is passed from the server's environment.
+const PASS_ENV: &[&str] = &["PATH", "LANG", "LANGUAGE", "TZ", "SSL_CERT_FILE", "SSL_CERT_DIR", "http_proxy", "https_proxy",
+    "HTTP_PROXY", "HTTPS_PROXY", "no_proxy", "NO_PROXY"];
+
+/// CHRISCORD_PLUGIN_SANDBOX=off runs plugins without the sandbox (for a
+/// plugin that needs more than it allows; the panel shows it).
+fn sandbox_off() -> bool {
+    std::env::var("CHRISCORD_PLUGIN_SANDBOX").map_or(false, |v| v.eq_ignore_ascii_case("off") || v == "0")
+}
+
 /// What's needed to start an installed plugin.
 async fn launch(s: &AppState, id: &str) -> Result<Launch, String> {
     let row = load(&s.pool, id).await.map_err(|_| "database error".to_string())?
@@ -629,7 +784,18 @@ async fn launch(s: &AppState, id: &str) -> Result<Launch, String> {
         "settings": row.manifest.settings_with(&row.settings),
         "data_dir": data.display().to_string(),
     }).to_string();
-    Ok(Launch { id: id.to_string(), name: row.manifest.name.clone(), program, args, code, data, url, hello })
+    // This server, DNS, and the web if it may.
+    let mut tcp = vec![crate::utils::port(), 53];
+    if row.manifest.internet && row.internet {
+        tcp.extend([80, 443]);
+        // A web proxy the server's told to use (passed on in PASS_ENV).
+        for k in ["https_proxy", "HTTPS_PROXY", "http_proxy", "HTTP_PROXY"] {
+            if let Some(p) = std::env::var(k).ok().and_then(|v| v.trim_end_matches('/').rsplit(':').next().and_then(|p| p.parse::<u16>().ok())) {
+                tcp.push(p);
+            }
+        }
+    }
+    Ok(Launch { id: id.to_string(), name: row.manifest.name.clone(), program, args, code, data, url, hello, tcp })
 }
 
 /// Starts it, or notes in its log why it can't.
@@ -652,6 +818,323 @@ pub fn start_all(s: Arc<AppState>) {
             start_one(&s, &r.get::<String, _>("id")).await;
         }
     });
+}
+
+// ── Using plugins from the app ───────────────────────────────────────────────
+//
+// Members use a plugin two ways: a command typed in the message box
+// ("music::play never gonna") and clicks in its panel (the app draws the
+// panel the plugin describes; plugins never run code in the app).
+//
+//   app → server: {"type": "plugin_command", "plugin", "command", "data": {arg: value}, "board_id"}
+//                 {"type": "plugin_action",  "plugin", "action", "value"?, "board_id"?}
+//   server → plugin (to its bot connection), with an "id" to answer:
+//                 {"type": "plugin_command", "id", "user", "board_id", "voice_board", "command", "args"}
+//                 {"type": "plugin_action",  "id", "user", "board_id", "voice_board", "action", "value"}
+//   plugin → server: {"type": "plugin_reply", "to": id, "content": text}   (only that member sees it)
+//                    {"type": "plugin_panel", "board_id"?, "data": panel or null}
+//   server → app: plugin_reply, plugin_panel, plugins_updated
+//
+// These pass through the server in the clear, which costs nothing here:
+// the plugin runs on this server, so whoever runs it sees what the plugin
+// sees anyway. A panel about one channel (a call, say) only goes to members
+// who can see that channel.
+
+/// The biggest panel a plugin may show (its JSON).
+const MAX_PANEL: usize = 64 << 10;
+/// Commands and clicks a member may send plugins: this many per 5 seconds.
+const ASK_PER_5S: u32 = 10;
+/// How long a plugin may answer a command.
+const ANSWER_FOR: Duration = Duration::from_secs(15 * 60);
+
+/// The plugin this member is, if it's one (for its connection, in ws.rs).
+pub async fn id_of_user(pool: &SqlitePool, username: &str) -> Option<String> {
+    sqlx::query("SELECT p.id AS id FROM plugins p JOIN users u ON u.public_key = p.bot_key WHERE u.username = ?")
+        .bind(username).fetch_optional(pool).await.ok().flatten().map(|r| r.get("id"))
+}
+
+/// Tells every app to load the plugins again (installed, changed, started…).
+fn announce(s: &AppState) {
+    let _ = s.tx.send(serde_json::json!({ "type": "plugins_updated" }).to_string());
+}
+
+impl Plugins {
+    /// Whether this member may ask plugins for something right now.
+    fn may_ask(&self, user: &str) -> bool {
+        let mut a = self.asked.lock().unwrap();
+        if a.len() > 5000 { a.retain(|_, (t, _)| t.elapsed() < Duration::from_secs(5)); }
+        let e = a.entry(user.to_string()).or_insert((Instant::now(), 0));
+        if e.0.elapsed() >= Duration::from_secs(5) { *e = (Instant::now(), 0); }
+        e.1 += 1;
+        e.1 <= ASK_PER_5S
+    }
+
+    fn remember(&self, id: &str, p: Pending) {
+        let mut m = self.pending.lock().unwrap();
+        if m.len() > 2000 { m.retain(|_, x| x.at.elapsed() < ANSWER_FOR); }
+        m.insert(id.to_string(), p);
+    }
+
+    fn has_panel(&self, plugin: &str, board: &str) -> bool {
+        self.panels.lock().unwrap().get(plugin).map_or(false, |m| m.contains_key(board))
+    }
+
+    /// A plugin's panels a member can see: [{board_id, panel}].
+    fn panels_for(&self, plugin: &str, sees: impl Fn(&str) -> bool) -> Vec<serde_json::Value> {
+        let all = self.panels.lock().unwrap();
+        let Some(m) = all.get(plugin) else { return Vec::new() };
+        m.iter().filter(|(b, _)| b.is_empty() || sees(b)).map(|(b, p)| serde_json::json!({
+            "board_id": if b.is_empty() { serde_json::Value::Null } else { serde_json::json!(b) }, "panel": p,
+        })).collect()
+    }
+}
+
+/// The plugin's connection ended (it stopped or restarted): its panels go.
+pub fn gone(s: &AppState, plugin: &str) {
+    let boards: Vec<String> = s.plugins.panels.lock().unwrap().remove(plugin).map(|m| m.into_keys().collect()).unwrap_or_default();
+    for b in boards {
+        let board = if b.is_empty() { serde_json::Value::Null } else { serde_json::json!(b) };
+        let _ = s.tx.send(serde_json::json!({ "type": "plugin_panel", "plugin": plugin, "board_id": board, "panel": null }).to_string());
+    }
+}
+
+async fn plugin_sees(pool: &SqlitePool, plugin_user: &str, board: &str) -> bool {
+    sqlx::query("SELECT 1 FROM bot_channels c JOIN users u ON u.public_key = c.public_key WHERE u.username = ? AND c.board_id = ?")
+        .bind(plugin_user).bind(board).fetch_optional(pool).await.ok().flatten().is_some()
+}
+
+/// One value a member gave: text or a number, as text, not too long.
+fn short_text(v: &serde_json::Value) -> Option<String> {
+    let t = match v {
+        serde_json::Value::String(t) => t.clone(),
+        serde_json::Value::Number(n) => n.to_string(),
+        serde_json::Value::Bool(b) => b.to_string(),
+        _ => return None,
+    };
+    Some(t.chars().filter(|c| !c.is_control() || *c == '\n').take(2000).collect())
+}
+
+/// What a member sent to use a plugin (from ws.rs).
+pub struct Use {
+    pub kind:   String, // "plugin_command" or "plugin_action"
+    pub plugin: String,
+    pub name:   String, // the command, or the action
+    pub args:   Option<serde_json::Value>,
+    pub value:  Option<String>,
+    pub board:  Option<String>,
+    /// Whether the member can see board (true without one).
+    pub board_visible: bool,
+}
+
+/// A member used a plugin: passed on to it, or why not (shown to them).
+pub async fn from_member(s: &Arc<AppState>, user: &str, u: Use) -> Result<(), String> {
+    if !s.plugins.may_ask(user) {
+        return Err("Slow down — that's a lot of plugin commands at once".into());
+    }
+    let row = sqlx::query("SELECT p.manifest AS manifest, p.enabled AS enabled, u.username AS username
+                           FROM plugins p LEFT JOIN users u ON u.public_key = p.bot_key WHERE p.id = ?")
+        .bind(&u.plugin).fetch_optional(&s.pool).await.map_err(|_| "Database error".to_string())?
+        .ok_or_else(|| format!("There's no plugin called {} on this server", u.plugin))?;
+    let m: Manifest = serde_json::from_str(&row.get::<String, _>("manifest")).map_err(|_| "Database error".to_string())?;
+    let Some(bot) = row.try_get::<Option<String>, _>("username").ok().flatten() else {
+        return Err(format!("{} isn't set up right — the server's owner can reinstall it", m.name));
+    };
+    let online = s.online.lock().unwrap().contains_key(&bot);
+    if row.get::<i64, _>("enabled") == 0 {
+        return Err(format!("{} is turned off on this server", m.name));
+    }
+    if !online {
+        return Err(format!("{} isn't running right now — try again in a moment", m.name));
+    }
+    if !u.board_visible {
+        return Err("You can't see that channel".into());
+    }
+
+    let id = crate::utils::generate_hex(16);
+    let voice_board = s.voice.lock().unwrap().get(user).cloned();
+    let payload = if u.kind == "plugin_command" {
+        let cmd = m.commands.iter().find(|c| c.name == u.name)
+            .ok_or_else(|| format!("{} has no command called {}", m.name, u.name))?;
+        let board = u.board.clone().ok_or_else(|| "Commands are sent from a channel".to_string())?;
+        if !plugin_sees(&s.pool, &bot, &board).await {
+            return Err(format!("{} can't see this channel — the server's owner can give it access in the admin panel (Plugins)", m.name));
+        }
+        // Only its own arguments, as text; the required ones there.
+        let given = u.args.as_ref().and_then(|a| a.as_object().cloned()).unwrap_or_default();
+        let mut args = serde_json::Map::new();
+        for a in &cmd.args {
+            match given.get(&a.name).and_then(short_text).filter(|t| !t.trim().is_empty()) {
+                Some(t) => {
+                    if a.kind == "choice" && !a.choices.is_empty() && !a.choices.contains(&t) {
+                        return Err(format!("{} must be one of: {}", a.name, a.choices.join(", ")));
+                    }
+                    if a.kind == "number" && t.trim().parse::<f64>().is_err() {
+                        return Err(format!("{} must be a number", a.name));
+                    }
+                    args.insert(a.name.clone(), serde_json::json!(t));
+                }
+                None if a.required => return Err(format!("{}::{} needs {}", m.id, cmd.name, a.name)),
+                None => {}
+            }
+        }
+        serde_json::json!({ "type": "plugin_command", "id": id, "user": user, "board_id": board,
+            "voice_board": voice_board, "command": cmd.name, "args": args })
+    } else {
+        // A click in its panel: the panel has to be one this member can see.
+        if u.name.is_empty() || u.name.len() > 100 {
+            return Err("That button doesn't do anything".into());
+        }
+        let key = u.board.clone().unwrap_or_default();
+        if !s.plugins.has_panel(&u.plugin, &key) {
+            return Err(format!("{} has changed since — try again", m.name));
+        }
+        serde_json::json!({ "type": "plugin_action", "id": id, "user": user, "board_id": u.board,
+            "voice_board": voice_board, "action": u.name,
+            "value": u.value.as_ref().map(|v| v.chars().filter(|c| !c.is_control()).take(2000).collect::<String>()) })
+    };
+    s.plugins.remember(&id, Pending { user: user.to_string(), plugin: u.plugin.clone(), board: u.board.clone(), at: Instant::now() });
+    crate::ws::send_to_user(s, &bot, payload);
+    Ok(())
+}
+
+/// What a plugin sent about its interface (from ws.rs): an answer to a
+/// member, or its panel. Err: why it was refused (told to the plugin).
+pub async fn from_plugin(s: &Arc<AppState>, plugin: &str, bot: &str, kind: &str, board: Option<String>,
+                         data: Option<serde_json::Value>, to: Option<String>, content: Option<String>) -> Result<(), String> {
+    match kind {
+        "plugin_reply" => {
+            let to = to.unwrap_or_default();
+            let (user, board) = {
+                let p = s.plugins.pending.lock().unwrap();
+                let x = p.get(&to).filter(|x| x.plugin == plugin && x.at.elapsed() < ANSWER_FOR)
+                    .ok_or_else(|| "plugin_reply: no such command (or it's too old to answer)".to_string())?;
+                (x.user.clone(), x.board.clone())
+            };
+            let text: String = content.unwrap_or_default().chars().take(2000).collect();
+            if text.trim().is_empty() { return Ok(()); }
+            crate::ws::send_to_user(s, &user, serde_json::json!({
+                "type": "plugin_reply", "plugin": plugin, "id": to, "board_id": board, "content": text,
+            }));
+            Ok(())
+        }
+        "plugin_panel" => {
+            let panel = data.unwrap_or(serde_json::Value::Null);
+            if !(panel.is_null() || panel.is_object()) {
+                return Err("plugin_panel: data must be an object (or null to remove it)".into());
+            }
+            if panel.to_string().len() > MAX_PANEL {
+                return Err("plugin_panel: the panel is too big (64 KB at most)".into());
+            }
+            let key = board.clone().unwrap_or_default();
+            if !key.is_empty() && !plugin_sees(&s.pool, bot, &key).await {
+                return Err("plugin_panel: that's not one of this plugin's channels".into());
+            }
+            {
+                let mut all = s.plugins.panels.lock().unwrap();
+                let m = all.entry(plugin.to_string()).or_default();
+                if panel.is_null() { m.remove(&key); } else { m.insert(key, panel.clone()); }
+            }
+            let _ = s.tx.send(serde_json::json!({
+                "type": "plugin_panel", "plugin": plugin, "board_id": board, "panel": panel,
+            }).to_string());
+            Ok(())
+        }
+        _ => Ok(()),
+    }
+}
+
+// ── Lanes ────────────────────────────────────────────────────────────────────
+//
+// End-to-end encrypted lines between a member's app and a plugin (the app's
+// and the SDK's lane.go). This server only passes them along: it can't read
+// them, and doesn't need to.
+//
+//   app → server: {"type": "plugin_lane", "plugin", "sid", "n", "eph"?, "data"}
+//   server → plugin: the same, with "from": the member
+//   plugin → server: {"type": "plugin_lane" | "plugin_lane_gone", "to", "sid", "n", "data"}
+//   server → app: {"type": "plugin_lane" | "plugin_lane_gone", "plugin", "sid", "n", "data"}
+
+/// Biggest sealed lane message (base64).
+const MAX_LANE: usize = 96 << 10;
+
+fn lane_ok(sid: &str, data: &str) -> bool {
+    sid.len() == 32 && sid.chars().all(|c| c.is_ascii_hexdigit()) && data.len() <= MAX_LANE
+}
+
+/// A member's lane message for a plugin.
+pub async fn lane_from_member(s: &Arc<AppState>, user: &str, plugin: &str, sid: &str, n: u64, eph: Option<String>, data: &str) -> Result<(), String> {
+    if !s.plugins.may_ask(user) {
+        return Err("Slow down — that's a lot of plugin commands at once".into());
+    }
+    if !lane_ok(sid, data) || eph.as_ref().map_or(false, |e| e.len() > 64) {
+        return Err("That message to the plugin was malformed".into());
+    }
+    let row = sqlx::query("SELECT p.manifest AS manifest, u.username AS username FROM plugins p
+                           LEFT JOIN users u ON u.public_key = p.bot_key WHERE p.id = ? AND p.enabled = 1")
+        .bind(plugin).fetch_optional(&s.pool).await.map_err(|_| "Database error".to_string())?
+        .ok_or_else(|| format!("There's no plugin called {plugin} on this server"))?;
+    let name = serde_json::from_str::<Manifest>(&row.get::<String, _>("manifest")).map(|m| m.name).unwrap_or_else(|_| plugin.to_string());
+    let Some(bot) = row.try_get::<Option<String>, _>("username").ok().flatten() else {
+        return Err(format!("{name} isn't set up right — the server's owner can reinstall it"));
+    };
+    if !s.online.lock().unwrap().contains_key(&bot) {
+        return Err(format!("{name} isn't running right now — try again in a moment"));
+    }
+    crate::ws::send_to_user(s, &bot, serde_json::json!({
+        "type": "plugin_lane", "from": user, "sid": sid, "n": n, "eph": eph, "data": data,
+    }));
+    Ok(())
+}
+
+/// A plugin's lane message (or "I don't know that lane") for a member.
+pub fn lane_from_plugin(s: &Arc<AppState>, plugin: &str, kind: &str, to: &str, sid: &str, n: u64, data: Option<String>) -> Result<(), String> {
+    let data = data.unwrap_or_default();
+    if to.is_empty() || !lane_ok(sid, &data) {
+        return Err(format!("{kind}: malformed"));
+    }
+    let mut msg = serde_json::json!({ "type": kind, "plugin": plugin, "sid": sid });
+    if kind == "plugin_lane" {
+        msg["n"] = serde_json::json!(n);
+        msg["data"] = serde_json::json!(data);
+    }
+    crate::ws::send_to_user(s, to, msg);
+    Ok(())
+}
+
+/// GET /api/plugins — for members: the plugins here, their commands, and
+/// the panels this member can see.
+pub async fn member_list(headers: HeaderMap, State(s): State<Arc<AppState>>) -> Result<Json<serde_json::Value>, ApiErr> {
+    let user = bots::me(&headers, &s).await?;
+    let vis = crate::access::visible_for(&s.pool, &user).await;
+    let sees = |b: &str| vis.as_ref().map_or(true, |v| v.boards.contains(b));
+    let rows = sqlx::query("SELECT p.id AS id, p.manifest AS manifest, p.bot_key AS bot_key, u.username AS username,
+                                   k.enc_key AS enc_key, k.sig AS enc_sig
+                            FROM plugins p LEFT JOIN users u ON u.public_key = p.bot_key
+                                           LEFT JOIN user_enc_keys k ON k.public_key = p.bot_key
+                            WHERE p.enabled = 1 ORDER BY p.installed_at")
+        .fetch_all(&s.pool).await.map_err(|_| dberr())?;
+    let online: HashSet<String> = s.online.lock().unwrap().keys().cloned().collect();
+    let mut out = Vec::new();
+    for r in rows {
+        let id: String = r.get("id");
+        let Ok(m) = serde_json::from_str::<Manifest>(&r.get::<String, _>("manifest")) else { continue };
+        let username: Option<String> = r.try_get("username").ok().flatten();
+        let enc_key: Option<String> = r.try_get("enc_key").ok().flatten();
+        let enc_sig: Option<String> = r.try_get("enc_sig").ok().flatten();
+        let panel = m.panel.clone();
+        out.push(serde_json::json!({
+            "id": id, "name": m.name, "version": m.version, "description": m.description,
+            "username": username, "connected": username.as_ref().map_or(false, |u| online.contains(u)),
+            // Its keys, for lanes: the app checks the encryption key's
+            // signature, and (with a signed member list) that the identity
+            // key is a plugin on it.
+            "lanes": m.lanes, "public_key": r.get::<String, _>("bot_key"), "enc_key": enc_key, "enc_sig": enc_sig,
+            "commands": m.commands,
+            "panel": panel.map(|p| serde_json::json!({ "title": if p.title.is_empty() { m.name.clone() } else { p.title }, "icon": p.icon })),
+            "panels": s.plugins.panels_for(&id, sees),
+        }));
+    }
+    Ok(Json(serde_json::json!({ "plugins": out })))
 }
 
 // ── Admin routes ─────────────────────────────────────────────────────────────
@@ -684,6 +1167,7 @@ pub async fn list(headers: HeaderMap, State(s): State<Arc<AppState>>) -> Result<
             "username": username.clone(), "connected": username.map_or(false, |u| online.contains(&u)),
             "permissions": perm_names(perms), "channels": channels_of(&s.pool, &p.bot_key).await,
             "settings": p.manifest.settings_with(&p.settings),
+            "internet": p.manifest.internet && p.internet,
             "installed_at": p.installed_at, "updated_at": p.updated_at,
             "code_dir": code_dir(&id).display().to_string(), "data_dir": data_dir(&id).display().to_string(),
         }));
@@ -709,7 +1193,15 @@ pub async fn list(headers: HeaderMap, State(s): State<Arc<AppState>>) -> Result<
             "room": r.get::<String, _>("room"), "room_type": r.get::<String, _>("room_type"),
         })).collect();
     let perms: Vec<serde_json::Value> = PERMS.iter().map(|(n, b)| serde_json::json!({ "name": n, "bit": b })).collect();
+    let sp = crate::sandbox::support();
+    let off = sandbox_off();
+    let sandbox_info = serde_json::json!({
+        "available": sp.sandboxed && !off,
+        "net": sp.net && !off,
+        "note": if off { "Turned off with CHRISCORD_PLUGIN_SANDBOX=off".to_string() } else { sp.note },
+    });
     Ok(Json(serde_json::json!({
+        "sandbox": sandbox_info,
         "platform": platform(), "plugins": installed, "found": found, "channels": channels,
         "permissions": perms, "folder": plugins_dir().display().to_string(),
     })))
@@ -769,6 +1261,9 @@ pub struct InstallReq {
     pub channels: Vec<String>,
     #[serde(default)]
     pub settings: serde_json::Map<String, serde_json::Value>,
+    /// Whether it may use the internet, if it asked (default: yes).
+    #[serde(default)]
+    pub internet: Option<bool>,
 }
 
 /// A free name for it here: its own, else with " (plugin)" or a number.
@@ -827,10 +1322,12 @@ pub async fn install(headers: HeaderMap, State(s): State<Arc<AppState>>, Json(b)
     let perms = perm_bits(&b.permissions) & asked & roles::ALL & !bots::BOT_NEVER;
     let channels = existing_boards(&s.pool, &b.channels).await?;
     let settings = manifest.settings_with(&b.settings);
+    let internet = manifest.internet && b.internet.unwrap_or(true);
 
     // Its code into place (an update replaces the old code; what it keeps
     // in plugin-data/ stays).
     s.plugins.stop(&id).await;
+    gone(&s, &id);
     let dest = code_dir(&id);
     if src_dir != dest {
         let _ = std::fs::create_dir_all(plugins_dir());
@@ -855,8 +1352,8 @@ pub async fn install(headers: HeaderMap, State(s): State<Arc<AppState>>, Json(b)
     match existing {
         Some(old) => {
             // An update: same identity; what it may do and see as now chosen.
-            sqlx::query("UPDATE plugins SET manifest = ?, settings = ?, enabled = 1, updated_at = ? WHERE id = ?")
-                .bind(&manifest_json).bind(&settings_json).bind(&at).bind(&id).execute(&s.pool).await.map_err(|_| dberr())?;
+            sqlx::query("UPDATE plugins SET manifest = ?, settings = ?, enabled = 1, internet = ?, updated_at = ? WHERE id = ?")
+                .bind(&manifest_json).bind(&settings_json).bind(internet as i64).bind(&at).bind(&id).execute(&s.pool).await.map_err(|_| dberr())?;
             ensure_member(&s, &id, &old.bot_key, &old.cert, &manifest).await?;
             set_access(&s.pool, &old.bot_key, perms, &channels).await?;
             username = username_of(&s.pool, &old.bot_key).await;
@@ -866,8 +1363,8 @@ pub async fn install(headers: HeaderMap, State(s): State<Arc<AppState>>, Json(b)
             let maker = maker(&s.pool).await?;
             let (seed, cert) = make_identity(&maker, &manifest)?;
             let cert_json = serde_json::to_string(&cert).unwrap_or_default();
-            sqlx::query("INSERT INTO plugins (id, manifest, bot_key, seed, cert, settings, enabled, installed_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?)")
-                .bind(&id).bind(&manifest_json).bind(&cert.bot_key).bind(&seed).bind(&cert_json).bind(&settings_json).bind(&at).bind(&at)
+            sqlx::query("INSERT INTO plugins (id, manifest, bot_key, seed, cert, settings, enabled, internet, installed_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, ?)")
+                .bind(&id).bind(&manifest_json).bind(&cert.bot_key).bind(&seed).bind(&cert_json).bind(&settings_json).bind(internet as i64).bind(&at).bind(&at)
                 .execute(&s.pool).await.map_err(|_| dberr())?;
             ensure_member(&s, &id, &cert.bot_key, &cert_json, &manifest).await?;
             set_access(&s.pool, &cert.bot_key, perms, &channels).await?;
@@ -877,6 +1374,7 @@ pub async fn install(headers: HeaderMap, State(s): State<Arc<AppState>>, Json(b)
     }
     bots::changed(&s);
     start_one(&s, &id).await;
+    announce(&s);
     Ok(Json(serde_json::json!({ "ok": true, "id": id, "username": username })))
 }
 
@@ -924,6 +1422,7 @@ pub struct UpdateReq {
     pub permissions: Option<Vec<String>>,
     pub channels:    Option<Vec<String>>,
     pub settings:    Option<serde_json::Map<String, serde_json::Value>>,
+    pub internet:    Option<bool>,
 }
 
 /// PUT /api/admin/plugins/:id — change what it may do and see, and its
@@ -947,16 +1446,19 @@ pub async fn update(headers: HeaderMap, Path(id): Path<String>, State(s): State<
         set_access(&s.pool, &key, perms, &channels).await?;
         bots::changed(&s);
     }
-    if let Some(set) = &b.settings {
-        let settings = p.manifest.settings_with(set);
-        sqlx::query("UPDATE plugins SET settings = ?, updated_at = ? WHERE id = ?")
-            .bind(serde_json::Value::Object(settings).to_string()).bind(now()).bind(&id)
+    if b.settings.is_some() || b.internet.is_some() {
+        let settings = p.manifest.settings_with(b.settings.as_ref().unwrap_or(&p.settings));
+        let internet = p.manifest.internet && b.internet.unwrap_or(p.internet);
+        sqlx::query("UPDATE plugins SET settings = ?, internet = ?, updated_at = ? WHERE id = ?")
+            .bind(serde_json::Value::Object(settings).to_string()).bind(internet as i64).bind(now()).bind(&id)
             .execute(&s.pool).await.map_err(|_| dberr())?;
         if p.enabled {
             s.plugins.stop(&id).await;
+            gone(&s, &id);
             start_one(&s, &id).await;
         }
     }
+    announce(&s);
     Ok(Json(serde_json::json!({ "ok": true, "status": s.plugins.status(&id) })))
 }
 
@@ -980,11 +1482,15 @@ async fn action(headers: HeaderMap, id: String, action: &str, s: Arc<AppState>) 
     let enable = action != "stop";
     sqlx::query("UPDATE plugins SET enabled = ? WHERE id = ?").bind(enable as i64).bind(&id)
         .execute(&s.pool).await.map_err(|_| dberr())?;
-    if action != "start" { s.plugins.stop(&id).await; }
+    if action != "start" {
+        s.plugins.stop(&id).await;
+        gone(&s, &id);
+    }
     if enable {
         ensure_member(&s, &id, &p.bot_key, &p.cert, &p.manifest).await?;
         start_one(&s, &id).await;
     }
+    announce(&s);
     Ok(Json(serde_json::json!({ "ok": true, "status": s.plugins.status(&id) })))
 }
 
@@ -1015,7 +1521,9 @@ pub async fn remove(headers: HeaderMap, Path(id): Path<String>, Query(q): Query<
     let _ = std::fs::remove_dir_all(code_dir(&id));
     let deleted = q.delete_data.as_deref() == Some("1") && std::fs::remove_dir_all(data_dir(&id)).is_ok();
     s.plugins.logs.lock().unwrap().remove(&id);
+    gone(&s, &id);
     bots::changed(&s);
+    announce(&s);
     tracing::info!("plugins: removed {id}{}", if deleted { " and its data" } else { "" });
     Ok(Json(serde_json::json!({ "ok": true, "data_deleted": deleted, "data_dir": data_dir(&id).display().to_string() })))
 }

@@ -83,8 +83,21 @@ struct ClientMsg {
     typing:          Option<bool>,
     /// voice_e2ee: who it's for (absent: everyone in the call)
     to:              Option<String>,
-    /// voice_e2ee: the key-exchange message itself — opaque to the server
+    /// voice_e2ee: the key-exchange message itself — opaque to the server;
+    /// plugin_command: its arguments; plugin_panel: the panel
     data:            Option<serde_json::Value>,
+    /// plugin_command / plugin_action (plugins.rs): which plugin, and the
+    /// command, or the button and what was typed with it
+    plugin:          Option<String>,
+    command:         Option<String>,
+    action:          Option<String>,
+    value:           Option<String>,
+    /// plugin_lane (plugins.rs, the app's lane.go): which lane, the
+    /// message's counter, and (opening one) the app's one-off key; the
+    /// sealed message itself is in data
+    sid:             Option<String>,
+    n:               Option<u64>,
+    eph:             Option<String>,
 }
 
 pub async fn ws_handler(
@@ -108,6 +121,9 @@ async fn handle_socket(socket: WebSocket, token: String, initial_status: Option<
         return;
     }
     let mut bot_second = (std::time::Instant::now(), 0u32);
+    // A plugin this server runs (plugins.rs): it may also show a panel and
+    // answer the commands members send it.
+    let plugin_id = if is_bot { crate::plugins::id_of_user(&state.pool, &username).await } else { None };
     // Where this account's picture/banner/bio are stored (by public key).
     let user_key = crate::pfp::storage_key_for(&state.pool, &username).await.unwrap_or_default();
     // Which channels this member can see (None = all). Worked out again
@@ -170,6 +186,51 @@ async fn handle_socket(socket: WebSocket, token: String, initial_status: Option<
                         }
                         let Ok(cm) = serde_json::from_str::<ClientMsg>(&text) else { continue };
                         match cm.msg_type.as_str() {
+                            // A member using a plugin: a command from the message box,
+                            // or a click in its panel (plugins.rs).
+                            "plugin_command" | "plugin_action" if !is_bot => {
+                                let u = crate::plugins::Use {
+                                    kind: cm.msg_type.clone(),
+                                    plugin: cm.plugin.clone().unwrap_or_default(),
+                                    name: (if cm.msg_type == "plugin_command" { cm.command.clone() } else { cm.action.clone() }).unwrap_or_default(),
+                                    args: cm.data.clone(),
+                                    value: cm.value.clone(),
+                                    board_visible: cm.board_id.as_deref().map_or(true, |b| sees(&visible, b)),
+                                    board: cm.board_id.clone(),
+                                };
+                                if let Err(why) = crate::plugins::from_member(&state, &username, u).await {
+                                    let notice = serde_json::json!({ "type": "plugin_reply", "plugin": cm.plugin, "board_id": cm.board_id, "content": why, "error": true });
+                                    if sink.send(Message::Text(notice.to_string())).await.is_err() { break; }
+                                }
+                            }
+                            // A member's lane to a plugin: sealed, passed on as it is.
+                            "plugin_lane" if !is_bot => {
+                                let data = cm.data.as_ref().and_then(|d| d.as_str()).unwrap_or("").to_string();
+                                if let Err(why) = crate::plugins::lane_from_member(&state, &username, cm.plugin.as_deref().unwrap_or(""),
+                                    cm.sid.as_deref().unwrap_or(""), cm.n.unwrap_or(0), cm.eph.clone(), &data).await {
+                                    let notice = serde_json::json!({ "type": "plugin_reply", "plugin": cm.plugin, "content": why, "error": true });
+                                    if sink.send(Message::Text(notice.to_string())).await.is_err() { break; }
+                                }
+                            }
+                            // A plugin's answer on a lane (or: it doesn't know that lane).
+                            "plugin_lane" | "plugin_lane_gone" if plugin_id.is_some() => {
+                                let id = plugin_id.clone().unwrap_or_default();
+                                let data = cm.data.as_ref().and_then(|d| d.as_str()).map(|d| d.to_string());
+                                if let Err(why) = crate::plugins::lane_from_plugin(&state, &id, &cm.msg_type, cm.to.as_deref().unwrap_or(""),
+                                    cm.sid.as_deref().unwrap_or(""), cm.n.unwrap_or(0), data) {
+                                    let notice = serde_json::json!({ "type": "action_denied", "message": why });
+                                    if sink.send(Message::Text(notice.to_string())).await.is_err() { break; }
+                                }
+                            }
+                            // A plugin answering a member, or showing its panel.
+                            "plugin_reply" | "plugin_panel" if plugin_id.is_some() => {
+                                let id = plugin_id.clone().unwrap_or_default();
+                                if let Err(why) = crate::plugins::from_plugin(&state, &id, &username, &cm.msg_type, cm.board_id.clone(),
+                                    cm.data.clone(), cm.to.clone(), cm.content.clone()).await {
+                                    let notice = serde_json::json!({ "type": "action_denied", "message": why });
+                                    if sink.send(Message::Text(notice.to_string())).await.is_err() { break; }
+                                }
+                            }
                             "subscribe" if cm.board_id.as_deref().map_or(false, |b| !sees(&visible, b)) => {}
                             "subscribe" => {
                                 if let Some(bid) = cm.board_id {
@@ -819,6 +880,14 @@ async fn handle_socket(socket: WebSocket, token: String, initial_status: Option<
                                 Some("users") | Some("server_updated") | Some("server_restarting") => true,
                                 // Bots added, changed or removed (bots.rs): the app reloads its list.
                                 Some("bots_updated") => true,
+                                // Plugins (plugins.rs): their list changed; a panel (only
+                                // one about a channel this member can see); and what's
+                                // passed between a member and a plugin, to just that one.
+                                Some("plugins_updated") => true,
+                                Some("plugin_panel") => v["board_id"].as_str().map_or(true, |b| sees(&visible, b)),
+                                Some("plugin_command") | Some("plugin_action") | Some("plugin_reply")
+                                | Some("plugin_lane") | Some("plugin_lane_gone") =>
+                                    v["target"].as_str() == Some(username.as_str()),
                                 Some("typing") => v["username"].as_str() != Some(username.as_str()),
                                 Some("rooms_updated") => true,
                                 Some("voice_state") => true,
@@ -827,6 +896,7 @@ async fn handle_socket(socket: WebSocket, token: String, initial_status: Option<
                                 // Message encryption keys moved (channel_keys.rs): the app shares
                                 // keys others need and retries messages it couldn't open. Only for
                                 // channels this member can see (or none named).
+                                Some("roster_changed") => true,
                                 Some("e2ee_changed") => v["board_id"].as_str().map_or(true, |b| b == crate::channel_keys::PRESENCE_KEY_ID || sees(&visible, b)),
                                 Some("presence") | Some("presence_gone") => true,
                                 // Imported history added or claimed (imports.rs): the app loads
@@ -907,6 +977,12 @@ async fn handle_socket(socket: WebSocket, token: String, initial_status: Option<
         }
     }
     broadcast_users(&state);
+    // A plugin that went away: its panels go too (it shows them again when
+    // it's back).
+    if let Some(id) = &plugin_id {
+        let still_on = state.online.lock().unwrap().contains_key(&username);
+        if !still_on { crate::plugins::gone(&state, id); }
+    }
 
     // A dropped connection ends their audio — but rather than vanishing
     // from the channel (which looks like they left), they stay listed as

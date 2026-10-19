@@ -17,6 +17,8 @@ mod profile;
 mod preview;
 mod rooms;
 mod plugins;
+mod roster;
+mod sandbox;
 mod tarfile;
 mod search_sync;
 mod state;
@@ -140,6 +142,7 @@ async fn main() {
     imports::init(&pool).await.expect("Failed to set up imported history");
     bots::init(&pool).await.expect("Failed to set up bots");
     plugins::init(&pool).await.expect("Failed to set up plugins");
+    roster::init(&pool).await.expect("Failed to set up the member list");
     search_sync::init(&pool).await.expect("Failed to set up search");
     hosting::init(&pool).await.expect("Failed to set up hosted servers");
     ws::init_moderation(&pool).await.expect("Failed to set up voice moderation");
@@ -293,6 +296,13 @@ async fn main() {
         .route("/api/admin/hosting/:id/restart", post(hosting::restart))
         .route("/api/admin/hosting/:id/owner-key", get(hosting::owner_key))
         // Plugins this server runs (plugins.rs).
+        .route("/api/plugins",                 get(plugins::member_list))
+        // The signed member list (roster.rs).
+        .route("/api/roster",                  get(roster::get).post(roster::append))
+        .route("/api/roster/proposals",        post(roster::propose))
+        .route("/api/roster/proposals/:id",    delete(roster::withdraw))
+        .route("/api/roster/proposals/:id/sign", post(roster::sign))
+        .route("/api/admin/roster",            delete(roster::reset))
         .route("/api/admin/plugins",           get(plugins::list))
         .route("/api/admin/plugins/upload",    post(plugins::upload)
             .layer(DefaultBodyLimit::max(plugins::MAX_UPLOAD)))

@@ -127,6 +127,9 @@
   .plug-name { display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
   .plug-ver { font-size:.75rem; color:var(--muted); font-weight:400; }
   #modal a { color:var(--accent); }
+  .plug-sb { display:flex; align-items:center; gap:4px; font-size:.75rem; color:var(--yellow); margin-top:3px; }
+  .plug-sb.ok { color:var(--green); }
+  .plug-sb .ic { width:13px; height:13px; }
   .plug-desc { color:var(--muted); font-size:.82rem; margin-top:2px; max-width:560px; }
   .plug-found { display:flex; align-items:center; gap:12px; padding:10px 0; border-top:1px solid var(--border); }
   .plug-found:first-of-type { border-top:none; }
@@ -246,7 +249,9 @@
 <symbol id="i-arrow_upward" viewBox="0 -960 960 960"><path d="M440-160v-487L216-423l-56-57 320-320 320 320-56 57-224-224v487h-80Z"/></symbol>
 <symbol id="i-arrow_downward" viewBox="0 -960 960 960"><path d="M440-800v487L216-537l-56 57 320 320 320-320-56-57-224 224v-487h-80Z"/></symbol>
 <symbol id="i-refresh" viewBox="0 -960 960 960"><path d="M480-160q-134 0-227-93t-93-227q0-134 93-227t227-93q69 0 132 28.5T720-690v-110h80v280H520v-80h168q-32-56-87.5-88T480-720q-100 0-170 70t-70 170q0 100 70 170t170 70q77 0 139-44t87-116h84q-28 106-114 173t-196 67Z"/></symbol>
-<symbol id="i-lock" viewBox="0 -960 960 960"><path d="M240-80q-33 0-56.5-23.5T160-160v-400q0-33 23.5-56.5T240-640h40v-80q0-83 58.5-141.5T480-920q83 0 141.5 58.5T680-720v80h40q33 0 56.5 23.5T800-560v400q0 33-23.5 56.5T720-80H240Zm0-80h480v-400H240v400Zm240-120q33 0 56.5-23.5T560-360q0-33-23.5-56.5T480-440q-33 0-56.5 23.5T400-360q0 33 23.5 56.5T480-280ZM360-640h240v-80q0-50-35-85t-85-35q-50 0-85 35t-35 85v80ZM240-160v-400 400Z"/></symbol>
+<symbol id="i-shield" viewBox="0 -960 960 960"><path d="M480-80q-139-35-229.5-159.5T160-516v-244l320-120 320 120v244q0 152-90.5 276.5T480-80Z"/></symbol>
+  <symbol id="i-warning" viewBox="0 -960 960 960"><path d="m40-120 440-760 440 760H40Zm440-120q17 0 28.5-11.5T520-280q0-17-11.5-28.5T480-320q-17 0-28.5 11.5T440-280q0 17 11.5 28.5T480-240Zm-40-120h80v-200h-80v200Z"/></symbol>
+  <symbol id="i-lock" viewBox="0 -960 960 960"><path d="M240-80q-33 0-56.5-23.5T160-160v-400q0-33 23.5-56.5T240-640h40v-80q0-83 58.5-141.5T480-920q83 0 141.5 58.5T680-720v80h40q33 0 56.5 23.5T800-560v400q0 33-23.5 56.5T720-80H240Zm0-80h480v-400H240v400Zm240-120q33 0 56.5-23.5T560-360q0-33-23.5-56.5T480-440q-33 0-56.5 23.5T400-360q0 33 23.5 56.5T480-280ZM360-640h240v-80q0-50-35-85t-85-35q-50 0-85 35t-35 85v80ZM240-160v-400 400Z"/></symbol>
 <symbol id="i-dashboard" viewBox="0 -960 960 960"><path d="M520-600v-240h320v240H520ZM120-440v-400h320v400H120Zm400 320v-400h320v400H520Zm-400 0v-240h320v240H120Zm80-400h160v-240H200v240Zm400 320h160v-240H600v240Zm0-480h160v-80H600v80ZM200-200h160v-80H200v80Zm160-320Zm240-160Zm0 240ZM360-280Z"/></symbol>
 <symbol id="i-palette" viewBox="0 -960 960 960"><path d="M480-80q-82 0-155-31.5t-127.5-86Q143-252 111.5-325T80-480q0-83 32.5-156t88-127Q256-817 330-848.5T488-880q80 0 151 27.5t124.5 76q53.5 48.5 85 115T880-518q0 115-70 176.5T640-280h-74q-9 0-12.5 5t-3.5 11q0 12 15 34.5t15 51.5q0 50-27.5 74T480-80Zm0-400Zm-220 40q26 0 43-17t17-43q0-26-17-43t-43-17q-26 0-43 17t-17 43q0 26 17 43t43 17Zm120-160q26 0 43-17t17-43q0-26-17-43t-43-17q-26 0-43 17t-17 43q0 26 17 43t43 17Zm200 0q26 0 43-17t17-43q0-26-17-43t-43-17q-26 0-43 17t-17 43q0 26 17 43t43 17Zm120 160q26 0 43-17t17-43q0-26-17-43t-43-17q-26 0-43 17t-17 43q0 26 17 43t43 17ZM480-160q9 0 14.5-5t5.5-13q0-14-15-33t-15-57q0-42 29-67t71-25h70q66 0 113-38.5T800-518q0-121-92.5-201.5T488-800q-136 0-232 93t-96 227q0 133 93.5 226.5T480-160Z"/></symbol>
 <symbol id="i-upload" viewBox="0 -960 960 960"><path d="M440-320v-326L336-542l-56-58 200-200 200 200-56 58-104-104v326h-80ZM240-160q-33 0-56.5-23.5T160-240v-120h80v120h480v-120h80v120q0 33-23.5 56.5T720-160H240Z"/></symbol>
@@ -530,8 +535,9 @@
     <section id="sec-plugins">
       <h2>Plugins</h2><p class="sub">Programs this server runs alongside itself — a music player for calls, say. Each one joins
         as a member of its own (tagged <b>PLUGIN</b> in the app), sees only the channels you give it and can do only
-        what you allow. A plugin runs on this machine with this server's access, so only install ones you trust — and since it runs
-        here, whoever runs this server can see whatever it can see.</p>
+        what you allow. On Linux each plugin runs in a sandbox: it can use its own folder, this server, and the internet if you allow
+        it — but not the server's files or other plugins. Since it runs here, whoever runs this server can see whatever it can see.</p>
+      <div class="plug-warn" id="plug-nosandbox" hidden></div>
       <div class="card" style="padding:8px 12px">
         <table><thead><tr><th>Plugin</th><th>Status</th><th style="text-align:right">Actions</th></tr></thead>
           <tbody id="plugins"></tbody></table>
@@ -1314,6 +1320,9 @@ async function loadPlugins(quiet = false) {
   try { data = await api('/api/admin/plugins'); } catch (e) { if (!quiet) toast(e.message, true); return; }
   plugData = data;
   document.querySelectorAll('.plug-folder').forEach(el => el.textContent = data.folder);
+  const ns = $('plug-nosandbox');
+  ns.hidden = !!data.sandbox?.available;
+  ns.innerHTML = data.sandbox?.available ? '' : `<b>Plugins aren't sandboxed on this machine:</b> ${esc(data.sandbox?.note || '')}. They can read this server's files, so only install ones you trust.`;
   const tb = $('plugins');
   if (quiet && (tb.contains(document.activeElement) || $('modal').classList.contains('on'))) return;
   tb.innerHTML = '';
@@ -1328,7 +1337,9 @@ async function loadPlugins(quiet = false) {
       <td><div class="plug-name"><span class="name">${esc(m.name)}</span><span class="plug-ver">${esc(m.version)}${m.author ? ` · ${esc(m.author)}` : ''}</span></div>
         ${m.description ? `<div class="plug-desc">${esc(m.description)}</div>` : ''}
         ${p.username ? `<div class="fp">Here as ${esc(p.username)}</div>` : ''}</td>
-      <td><span class="dot ${dot}"></span>${label}${st.restarts ? ` <span class="hint">(${st.restarts} restart${st.restarts === 1 ? '' : 's'})</span>` : ''}</td>
+      <td><span class="dot ${dot}"></span>${label}${st.restarts ? ` <span class="hint">(${st.restarts} restart${st.restarts === 1 ? '' : 's'})</span>` : ''}
+        ${state === 'running' || state === 'restarting' ? (st.sandboxed ? `<div class="plug-sb ok" title="It can use its own folder and the network you allowed, nothing else on this machine">${icon('shield')}Sandboxed</div>`
+          : `<div class="plug-sb" title="${esc(st.sandbox_note || '')}">${icon('warning')}Not sandboxed</div>`) : ''}</td>
       <td><div class="acts">
         <button class="small ghost" data-edit>Settings</button>
         <button class="small ghost" data-logs>Log</button>
@@ -1396,13 +1407,18 @@ async function pluginDialog({ manifest: m, source, installed, plugin, problem })
   box.innerHTML = `<h3>${esc(title)}</h3>
     <p class="hint">${esc(m.description || '')}${m.author ? ` — by ${esc(m.author)}` : ''}${m.homepage ? ` · <a href="${esc(m.homepage)}" target="_blank" rel="noopener">${esc(m.homepage)}</a>` : ''}</p>
     ${problem ? `<div class="plug-warn" style="border-color:var(--red)">${esc(problem)}</div>` : ''}
-    ${source ? `<div class="plug-warn">It will run on this machine, with this server's access — install it only if you trust ${m.author ? esc(m.author) : 'whoever made it'}.
+    ${source ? `<div class="plug-warn">${plugData?.sandbox?.available
+        ? `It will run on this machine in a sandbox: it can use its own folder${plugData?.sandbox?.net ? ', connect to this server, and the internet only if you allow it' : ' and the network'}, but not the server's files or other plugins.`
+        : `It will run on this machine <b>without a sandbox</b> (${esc(plugData?.sandbox?.note || 'not available here')}), so it could read the server's files — install it only if you trust ${m.author ? esc(m.author) : 'whoever made it'}.`}
       It joins the server as <b>${esc(m.name)}</b>, marked as a plugin, and since it runs here, whoever runs this server can see what it sees.</div>` : ''}
     <label class="f">What it may do</label>
     ${m.permissions.length ? `<div class="plug-perms">${m.permissions.map(n => { const l = permLabel(n); return `
       <label class="plug-perm"><input type="checkbox" data-perm="${esc(n)}" ${allowed.has(n) || (source && !before) || (source && before && !oldAsked.has(n)) ? 'checked' : ''}>
         <span><b>${esc(l.label)}</b>${before && !oldAsked.has(n) ? '<span class="new">new</span>' : ''}${l.about ? `<div class="about">${esc(l.about)}</div>` : ''}</span></label>`; }).join('')}</div>`
       : '<p class="hint" style="margin-top:0">Nothing — it doesn’t ask for any permissions.</p>'}
+    ${m.internet ? `<div class="plug-perms" style="margin-top:6px"><label class="plug-perm"><input type="checkbox" id="plug-net" ${!cur || cur.internet || (before && !before.internet) ? 'checked' : ''}>
+        <span><b>Use the internet</b>${before && !before.internet ? '<span class="new">new</span>' : ''}<div class="about">Connect to web sites (ports 80 and 443)${plugData?.sandbox?.net
+          ? '. Without it, it can only reach this server.' : ' — this machine can’t limit a plugin’s network, so it can either way.'}</div></span></label></div>` : ''}
     ${m.channels ? `<label class="f">Channels it sees</label><p class="hint" style="margin:-2px 0 6px">${esc(m.channels)}</p>
       <div class="plug-chans">${groups.map(g => `<div class="cat">${esc(g.room)}</div>${g.list.map(c => `
         <label><input type="checkbox" data-chan="${esc(c.id)}" ${chans.has(c.id) ? 'checked' : ''}>${c.room_type === 'voice' ? icon('volume_up') : '#'} ${esc(c.name)}</label>`).join('')}`).join('') || '<div class="hint">No channels yet.</div>'}</div>` : ''}
@@ -1415,6 +1431,7 @@ async function pluginDialog({ manifest: m, source, installed, plugin, problem })
   $('modal-go').onclick = async () => {
     const permissions = [...box.querySelectorAll('[data-perm]:checked')].map(i => i.dataset.perm);
     const channels = [...box.querySelectorAll('[data-chan]:checked')].map(i => i.dataset.chan);
+    const internet = m.internet ? !!$('plug-net')?.checked : undefined;
     const set = {};
     for (const s of m.settings || []) {
       const el = $(`ps-${s.key}`); if (!el) continue;
@@ -1423,10 +1440,10 @@ async function pluginDialog({ manifest: m, source, installed, plugin, problem })
     $('modal-go').disabled = true;
     try {
       if (source) {
-        const r = await api('/api/admin/plugins/install', { json: { source, permissions, channels, settings: set } });
+        const r = await api('/api/admin/plugins/install', { json: { source, permissions, channels, settings: set, internet } });
         toast(before ? `${m.name} updated` : `${m.name} installed${r.username ? ` — it's here as ${r.username}` : ''}`);
       } else {
-        await api(`/api/admin/plugins/${m.id}`, { method: 'PUT', json: { permissions, channels: m.channels ? channels : undefined, settings: set } });
+        await api(`/api/admin/plugins/${m.id}`, { method: 'PUT', json: { permissions, channels: m.channels ? channels : undefined, settings: set, internet } });
         toast(`${m.name} saved`);
       }
       close(); loadPlugins();

@@ -380,7 +380,7 @@ pub fn session_started(token: &str, key: &str) {
 
 // ── Handlers ─────────────────────────────────────────────────────────────────
 
-async fn me(h: &HeaderMap, s: &AppState) -> Result<String, ApiErr> {
+pub(crate) async fn me(h: &HeaderMap, s: &AppState) -> Result<String, ApiErr> {
     let token = h.get("X-Session-Token").and_then(|v| v.to_str().ok()).unwrap_or("");
     db::verify_token(&s.pool, token).await.map_err(|_| dberr())?
         .ok_or_else(|| err(StatusCode::UNAUTHORIZED, "Unauthorized"))
