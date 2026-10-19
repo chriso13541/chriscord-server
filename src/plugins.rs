@@ -1198,6 +1198,7 @@ pub async fn list(headers: HeaderMap, State(s): State<Arc<AppState>>) -> Result<
     let sandbox_info = serde_json::json!({
         "available": sp.sandboxed && !off,
         "net": sp.net && !off,
+        "abi": sp.abi, // Landlock's version here (0: none)
         "note": if off { "Turned off with CHRISCORD_PLUGIN_SANDBOX=off".to_string() } else { sp.note },
     });
     Ok(Json(serde_json::json!({

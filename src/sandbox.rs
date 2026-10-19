@@ -261,7 +261,9 @@ mod imp {
     }
 }
 
-pub use imp::{enter, prepare, support, Sandbox};
+pub use imp::{enter, prepare, support};
+#[cfg(test)]
+use imp::Sandbox; // the tests name it; the server only holds what prepare returns
 
 /// Where a sandboxed plugin keeps its temporary files (inside its data).
 pub fn temp_dir(data: &Path) -> PathBuf { data.join(".tmp") }
