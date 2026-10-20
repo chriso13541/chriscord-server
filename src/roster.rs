@@ -39,6 +39,11 @@ const MAX_SIGS: usize = 64;
 const MAX_PROPOSALS: i64 = 200;
 const MAX_PAGE: i64 = 5000;
 
+/// Changes to the list one at a time: each one's checks (is there a list
+/// yet? is this for it?) and its write happen together, so two can't both
+/// pass the checks and then both be stored (two starts, say).
+static WRITE: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 pub async fn init(pool: &SqlitePool) -> Result<(), sqlx::Error> {
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS roster_entries (
@@ -122,10 +127,21 @@ fn changed(s: &AppState) {
     let _ = s.tx.send(serde_json::json!({ "type": "roster_changed" }).to_string());
 }
 
+/// A transaction that holds SQLite's write lock from its first statement.
+/// One that reads first and writes after fails ("database is locked") if
+/// anything else in the database was written in between — a message, say
+/// — which made adding an entry or an approval fail at random on a busy
+/// server. Taking the lock first, it waits its turn instead (busy timeout).
+async fn begin_write(s: &AppState) -> Result<sqlx::Transaction<'static, sqlx::Sqlite>, ApiErr> {
+    let mut tx = s.pool.begin().await.map_err(|_| dberr())?;
+    sqlx::query("UPDATE roster_proposals SET op_id = op_id WHERE 0").execute(&mut *tx).await.map_err(|_| dberr())?;
+    Ok(tx)
+}
+
 /// The list's id: its first entry's op id ("" if there's none yet).
-async fn roster_id(pool: &SqlitePool) -> String {
-    sqlx::query("SELECT op_id FROM roster_entries ORDER BY seq LIMIT 1").fetch_optional(pool).await
-        .ok().flatten().map(|r| r.get("op_id")).unwrap_or_default()
+async fn roster_id(conn: &mut sqlx::SqliteConnection) -> Result<String, ApiErr> {
+    Ok(sqlx::query("SELECT op_id FROM roster_entries ORDER BY seq LIMIT 1").fetch_optional(conn).await
+        .map_err(|_| dberr())?.map(|r| r.get("op_id")).unwrap_or_default())
 }
 
 fn sigs_json(sigs: &[Sig]) -> String { serde_json::to_string(sigs).unwrap_or_else(|_| "[]".into()) }
@@ -141,18 +157,23 @@ pub struct AfterQuery {
 /// GET /api/roster
 pub async fn get(headers: HeaderMap, Query(q): Query<AfterQuery>, State(s): State<Arc<AppState>>) -> Result<Json<serde_json::Value>, ApiErr> {
     me(&headers, &s).await?;
+    // One read transaction: the entries, the proposals and the list's id
+    // all as of the same moment (not an id from after a reset alongside
+    // entries from before it).
+    let mut tx = s.pool.begin().await.map_err(|_| dberr())?;
     let rows = sqlx::query("SELECT seq, body, sigs FROM roster_entries WHERE seq > ? ORDER BY seq LIMIT ?")
-        .bind(q.after).bind(MAX_PAGE).fetch_all(&s.pool).await.map_err(|_| dberr())?;
+        .bind(q.after).bind(MAX_PAGE).fetch_all(&mut *tx).await.map_err(|_| dberr())?;
     let entries: Vec<serde_json::Value> = rows.iter().map(|r| serde_json::json!({
         "seq": r.get::<i64, _>("seq"), "body": r.get::<String, _>("body"), "sigs": sigs_of(&r.get::<String, _>("sigs")),
     })).collect();
     let more = entries.len() as i64 == MAX_PAGE;
     let proposals: Vec<serde_json::Value> = sqlx::query("SELECT body, sigs, created_at FROM roster_proposals ORDER BY created_at")
-        .fetch_all(&s.pool).await.map_err(|_| dberr())?.iter().map(|r| serde_json::json!({
+        .fetch_all(&mut *tx).await.map_err(|_| dberr())?.iter().map(|r| serde_json::json!({
             "body": r.get::<String, _>("body"), "sigs": sigs_of(&r.get::<String, _>("sigs")),
             "created_at": r.get::<String, _>("created_at"),
         })).collect();
-    let id = roster_id(&s.pool).await;
+    let id = roster_id(&mut *tx).await?;
+    tx.commit().await.map_err(|_| dberr())?;
     Ok(Json(serde_json::json!({ "id": id, "entries": entries, "more": more, "proposals": proposals })))
 }
 
@@ -170,9 +191,12 @@ pub async fn append(headers: HeaderMap, State(s): State<Arc<AppState>>, Json(b):
     let h = head(&b.body)?;
     let signers = check_sigs(&b.body, &b.sigs)?;
     if !signers.contains(&h.by) { return Err(bad("It has to be signed by whoever made it")); }
-    let id = roster_id(&s.pool).await;
+    let owner = crate::admin::owner_username(&s.pool).await;
+    let _w = WRITE.lock().await;
+    // The checks, the entry and its proposal's removal: all or nothing.
+    let mut tx = begin_write(&s).await?;
+    let id = roster_id(&mut *tx).await?;
     if id.is_empty() {
-        let owner = crate::admin::owner_username(&s.pool).await;
         if h.op != "start" || !h.roster.is_empty() || owner.as_deref() != Some(user.as_str()) || h.by != key {
             return Err(bad("Only the server's owner can start the member list"));
         }
@@ -181,15 +205,16 @@ pub async fn append(headers: HeaderMap, State(s): State<Arc<AppState>>, Json(b):
     }
     let r = sqlx::query("INSERT OR IGNORE INTO roster_entries (op_id, body, sigs, added_by, added_at) VALUES (?, ?, ?, ?, ?)")
         .bind(&h.id).bind(&b.body).bind(sigs_json(&b.sigs)).bind(&user).bind(chrono::Utc::now().to_rfc3339())
-        .execute(&s.pool).await.map_err(|_| dberr())?;
+        .execute(&mut *tx).await.map_err(|_| dberr())?;
     // Proposed first, now in the list: no longer waiting.
-    let _ = sqlx::query("DELETE FROM roster_proposals WHERE op_id = ?").bind(&h.id).execute(&s.pool).await;
+    sqlx::query("DELETE FROM roster_proposals WHERE op_id = ?").bind(&h.id).execute(&mut *tx).await.map_err(|_| dberr())?;
+    let seq: i64 = sqlx::query("SELECT seq FROM roster_entries WHERE op_id = ?").bind(&h.id)
+        .fetch_one(&mut *tx).await.map_err(|_| dberr())?.get("seq");
+    tx.commit().await.map_err(|_| dberr())?;
     if r.rows_affected() > 0 {
         tracing::info!("roster: {user} added a {} entry", h.op);
     }
     changed(&s);
-    let seq: i64 = sqlx::query("SELECT seq FROM roster_entries WHERE op_id = ?").bind(&h.id)
-        .fetch_one(&s.pool).await.map_err(|_| dberr())?.get("seq");
     Ok(Json(serde_json::json!({ "ok": true, "seq": seq })))
 }
 
@@ -199,13 +224,19 @@ pub async fn propose(headers: HeaderMap, State(s): State<Arc<AppState>>, Json(b)
     let h = head(&b.body)?;
     let signers = check_sigs(&b.body, &b.sigs)?;
     if h.by != key || !signers.contains(&key) { return Err(bad("A proposal has to be yours, and signed")); }
-    let id = roster_id(&s.pool).await;
+    let _w = WRITE.lock().await;
+    let mut tx = begin_write(&s).await?;
+    let id = roster_id(&mut *tx).await?;
     if id.is_empty() || h.roster != id { return Err(bad("That's for a different member list")); }
-    let n: i64 = sqlx::query("SELECT COUNT(*) AS n FROM roster_proposals").fetch_one(&s.pool).await.map_err(|_| dberr())?.get("n");
+    let n: i64 = sqlx::query("SELECT COUNT(*) AS n FROM roster_proposals").fetch_one(&mut *tx).await.map_err(|_| dberr())?.get("n");
     if n >= MAX_PROPOSALS { return Err(bad("Too many changes are waiting for approval — approve or withdraw some first")); }
+    let applied: bool = sqlx::query("SELECT 1 FROM roster_entries WHERE op_id = ?").bind(&h.id)
+        .fetch_optional(&mut *tx).await.map_err(|_| dberr())?.is_some();
+    if applied { return Err(bad("That change is already in the member list")); }
     sqlx::query("INSERT OR IGNORE INTO roster_proposals (op_id, body, sigs, proposer, created_at) VALUES (?, ?, ?, ?, ?)")
         .bind(&h.id).bind(&b.body).bind(sigs_json(&b.sigs)).bind(&key).bind(chrono::Utc::now().to_rfc3339())
-        .execute(&s.pool).await.map_err(|_| dberr())?;
+        .execute(&mut *tx).await.map_err(|_| dberr())?;
+    tx.commit().await.map_err(|_| dberr())?;
     tracing::info!("roster: {user} proposed a {} change", h.op);
     changed(&s);
     Ok(Json(serde_json::json!({ "ok": true, "id": h.id })))
@@ -215,7 +246,8 @@ pub async fn propose(headers: HeaderMap, State(s): State<Arc<AppState>>, Json(b)
 pub async fn sign(headers: HeaderMap, Path(id): Path<String>, State(s): State<Arc<AppState>>, Json(sig): Json<Sig>) -> Result<Json<serde_json::Value>, ApiErr> {
     let (user, key) = me(&headers, &s).await?;
     if sig.key.to_lowercase() != key { return Err(bad("You can only add your own approval")); }
-    let mut tx = s.pool.begin().await.map_err(|_| dberr())?;
+    let _w = WRITE.lock().await;
+    let mut tx = begin_write(&s).await?;
     let row = sqlx::query("SELECT body, sigs FROM roster_proposals WHERE op_id = ?").bind(&id)
         .fetch_optional(&mut *tx).await.map_err(|_| dberr())?
         .ok_or_else(|| err(StatusCode::NOT_FOUND, "That change isn't waiting any more"))?;
@@ -237,6 +269,7 @@ pub async fn sign(headers: HeaderMap, Path(id): Path<String>, State(s): State<Ar
 /// DELETE /api/roster/proposals/:id — withdrawn (or turned down).
 pub async fn withdraw(headers: HeaderMap, Path(id): Path<String>, State(s): State<Arc<AppState>>) -> Result<Json<serde_json::Value>, ApiErr> {
     let (user, key) = me(&headers, &s).await?;
+    let _w = WRITE.lock().await;
     let row = sqlx::query("SELECT proposer FROM roster_proposals WHERE op_id = ?").bind(&id)
         .fetch_optional(&s.pool).await.map_err(|_| dberr())?
         .ok_or_else(|| err(StatusCode::NOT_FOUND, "That change isn't waiting any more"))?;
@@ -253,8 +286,13 @@ pub async fn withdraw(headers: HeaderMap, Path(id): Path<String>, State(s): Stat
 /// Every app that had seen the old list warns that it was started over.
 pub async fn reset(headers: HeaderMap, State(s): State<Arc<AppState>>) -> Result<Json<serde_json::Value>, ApiErr> {
     check_owner(&headers, &s)?;
-    sqlx::query("DELETE FROM roster_entries").execute(&s.pool).await.map_err(|_| dberr())?;
-    sqlx::query("DELETE FROM roster_proposals").execute(&s.pool).await.map_err(|_| dberr())?;
+    let _w = WRITE.lock().await;
+    // Both or neither: never the old list's proposals left waiting on a
+    // new list, or half a list.
+    let mut tx = begin_write(&s).await?;
+    sqlx::query("DELETE FROM roster_entries").execute(&mut *tx).await.map_err(|_| dberr())?;
+    sqlx::query("DELETE FROM roster_proposals").execute(&mut *tx).await.map_err(|_| dberr())?;
+    tx.commit().await.map_err(|_| dberr())?;
     tracing::warn!("roster: the member list was started over by the owner");
     changed(&s);
     Ok(Json(serde_json::json!({ "ok": true })))
