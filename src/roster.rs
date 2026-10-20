@@ -10,6 +10,7 @@
 //!   POST   /api/roster                        {body, sigs}: add an entry (signatures checked)
 //!   POST   /api/roster/proposals              {body, sigs}: propose a change, for approvers to sign
 //!   POST   /api/roster/proposals/:id/sign     {key, sig}: add your approval
+//!   POST   /api/roster/proposals/:id/reject   {key, sig}: turn it down (signed; the apps count it)
 //!   DELETE /api/roster/proposals/:id          withdraw it (whoever proposed it, or the owner)
 //!   DELETE /api/admin/roster                  start the list over (owner key): every app warns
 //!
@@ -34,6 +35,9 @@ fn dberr() -> ApiErr { err(StatusCode::INTERNAL_SERVER_ERROR, "DB error") }
 fn bad(msg: &str) -> ApiErr { err(StatusCode::BAD_REQUEST, msg) }
 
 const CONTEXT: &[u8] = b"chriscord-roster-v1\x00";
+/// What a rejection signs (the app's rosterRejectMessage): never the same
+/// message as an approval.
+const REJECT_CONTEXT: &[u8] = b"chriscord-roster-reject-v1\x00";
 const MAX_BODY: usize = 64 << 10;
 const MAX_SIGS: usize = 64;
 const MAX_PROPOSALS: i64 = 200;
@@ -64,6 +68,8 @@ pub async fn init(pool: &SqlitePool) -> Result<(), sqlx::Error> {
             created_at TEXT NOT NULL
         )",
     ).execute(pool).await?;
+    // Approvers' rejections (added later: ignore "duplicate column").
+    let _ = sqlx::query("ALTER TABLE roster_proposals ADD COLUMN rejects TEXT NOT NULL DEFAULT '[]'").execute(pool).await;
     Ok(())
 }
 
@@ -94,9 +100,11 @@ fn head(body: &str) -> Result<Head, ApiErr> {
 }
 
 /// The keys whose signatures over body hold up; Err if any doesn't.
-fn check_sigs(body: &str, sigs: &[Sig]) -> Result<Vec<String>, ApiErr> {
+fn check_sigs(body: &str, sigs: &[Sig]) -> Result<Vec<String>, ApiErr> { check_sigs_in(CONTEXT, body, sigs) }
+
+fn check_sigs_in(context: &[u8], body: &str, sigs: &[Sig]) -> Result<Vec<String>, ApiErr> {
     if sigs.is_empty() || sigs.len() > MAX_SIGS { return Err(bad("Wrong number of signatures")); }
-    let mut msg = CONTEXT.to_vec();
+    let mut msg = context.to_vec();
     msg.extend_from_slice(body.as_bytes());
     let mut keys = Vec::new();
     for s in sigs {
@@ -167,9 +175,10 @@ pub async fn get(headers: HeaderMap, Query(q): Query<AfterQuery>, State(s): Stat
         "seq": r.get::<i64, _>("seq"), "body": r.get::<String, _>("body"), "sigs": sigs_of(&r.get::<String, _>("sigs")),
     })).collect();
     let more = entries.len() as i64 == MAX_PAGE;
-    let proposals: Vec<serde_json::Value> = sqlx::query("SELECT body, sigs, created_at FROM roster_proposals ORDER BY created_at")
+    let proposals: Vec<serde_json::Value> = sqlx::query("SELECT body, sigs, rejects, created_at FROM roster_proposals ORDER BY created_at")
         .fetch_all(&mut *tx).await.map_err(|_| dberr())?.iter().map(|r| serde_json::json!({
             "body": r.get::<String, _>("body"), "sigs": sigs_of(&r.get::<String, _>("sigs")),
+            "rejects": sigs_of(&r.get::<String, _>("rejects")),
             "created_at": r.get::<String, _>("created_at"),
         })).collect();
     let id = roster_id(&mut *tx).await?;
@@ -264,6 +273,32 @@ pub async fn sign(headers: HeaderMap, Path(id): Path<String>, State(s): State<Ar
     tracing::info!("roster: {user} approved a change");
     changed(&s);
     Ok(Json(serde_json::json!({ "ok": true, "sigs": sigs })))
+}
+
+/// POST /api/roster/proposals/:id/reject — you turn it down. Only kept
+/// here: every app checks the signature and whether you're an approver,
+/// and shows it as turned down once it can't get the approvals it needs.
+pub async fn reject(headers: HeaderMap, Path(id): Path<String>, State(s): State<Arc<AppState>>, Json(sig): Json<Sig>) -> Result<Json<serde_json::Value>, ApiErr> {
+    let (user, key) = me(&headers, &s).await?;
+    if sig.key.to_lowercase() != key { return Err(bad("You can only turn it down yourself")); }
+    let _w = WRITE.lock().await;
+    let mut tx = begin_write(&s).await?;
+    let row = sqlx::query("SELECT body, rejects FROM roster_proposals WHERE op_id = ?").bind(&id)
+        .fetch_optional(&mut *tx).await.map_err(|_| dberr())?
+        .ok_or_else(|| err(StatusCode::NOT_FOUND, "That change isn't waiting any more"))?;
+    let body: String = row.get("body");
+    check_sigs_in(REJECT_CONTEXT, &body, std::slice::from_ref(&sig))?;
+    let mut rejects: Vec<Sig> = serde_json::from_str(&row.get::<String, _>("rejects")).unwrap_or_default();
+    if !rejects.iter().any(|x| x.key.to_lowercase() == key) {
+        if rejects.len() >= MAX_SIGS { return Err(bad("Too many signatures")); }
+        rejects.push(Sig { key: key.clone(), sig: sig.sig });
+    }
+    sqlx::query("UPDATE roster_proposals SET rejects = ? WHERE op_id = ?").bind(sigs_json(&rejects)).bind(&id)
+        .execute(&mut *tx).await.map_err(|_| dberr())?;
+    tx.commit().await.map_err(|_| dberr())?;
+    tracing::info!("roster: {user} turned a change down");
+    changed(&s);
+    Ok(Json(serde_json::json!({ "ok": true })))
 }
 
 /// DELETE /api/roster/proposals/:id — withdrawn (or turned down).

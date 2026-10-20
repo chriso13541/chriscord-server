@@ -302,6 +302,7 @@ async fn main() {
         .route("/api/roster/proposals",        post(roster::propose))
         .route("/api/roster/proposals/:id",    delete(roster::withdraw))
         .route("/api/roster/proposals/:id/sign", post(roster::sign))
+        .route("/api/roster/proposals/:id/reject", post(roster::reject))
         .route("/api/admin/roster",            delete(roster::reset))
         .route("/api/admin/plugins",           get(plugins::list))
         .route("/api/admin/plugins/upload",    post(plugins::upload)

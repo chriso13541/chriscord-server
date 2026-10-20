@@ -197,7 +197,15 @@ pub struct Manifest {
     /// Whether it shows a panel in the app's plugins area, and how.
     #[serde(default)]
     pub panel: Option<PanelInfo>,
+    /// Its icon in the app: a .ico (or .png) file in its folder, e.g.
+    /// "icon.ico". Without one the app shows its profile picture (by
+    /// default the coloured circle with its initial).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub icon: String,
 }
+
+/// The most an icon file may be.
+const MAX_ICON: u64 = 256 << 10;
 
 #[derive(Deserialize, Serialize, Clone)]
 pub struct Command {
@@ -307,12 +315,33 @@ impl Manifest {
                 }
             }
         }
+        if !self.icon.is_empty() {
+            let lower = self.icon.to_ascii_lowercase();
+            if self.icon.len() > 100 || crate::tarfile::safe_path(&self.icon).is_none() || !(lower.ends_with(".ico") || lower.ends_with(".png")) {
+                return Err("The plugin's icon has to be a .ico or .png file in its folder".into());
+            }
+        }
         if let Some(p) = &self.panel {
             if p.title.chars().count() > 32 || p.icon.len() > 40 || !p.icon.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_') {
                 return Err("The plugin's panel has too long a title or a bad icon name".into());
             }
         }
         Ok(())
+    }
+
+    /// Its icon as a data: URL for the app (None: it has none, or the file
+    /// isn't there or isn't an icon — the app then shows its picture).
+    fn icon_data(&self, code: &std::path::Path) -> Option<String> {
+        use base64::Engine as _;
+        if self.icon.is_empty() { return None; }
+        let path = code.join(crate::tarfile::safe_path(&self.icon)?);
+        if std::fs::metadata(&path).ok()?.len() > MAX_ICON { return None; }
+        let data = std::fs::read(&path).ok()?;
+        // By what it is, not its name: a Windows icon or a PNG.
+        let mime = if data.starts_with(&[0, 0, 1, 0]) { "image/x-icon" }
+                   else if data.starts_with(b"\x89PNG\r\n\x1a\n") { "image/png" }
+                   else { return None };
+        Some(format!("data:{mime};base64,{}", base64::engine::general_purpose::STANDARD.encode(&data)))
     }
 
     /// The command for this platform: the program and its arguments.
@@ -1131,6 +1160,8 @@ pub async fn member_list(headers: HeaderMap, State(s): State<Arc<AppState>>) -> 
             "lanes": m.lanes, "public_key": r.get::<String, _>("bot_key"), "enc_key": enc_key, "enc_sig": enc_sig,
             "commands": m.commands,
             "panel": panel.map(|p| serde_json::json!({ "title": if p.title.is_empty() { m.name.clone() } else { p.title }, "icon": p.icon })),
+            // Its own icon file (plugin.json "icon"), if it has one.
+            "icon": m.icon_data(&code_dir(&id)),
             "panels": s.plugins.panels_for(&id, sees),
         }));
     }
@@ -1312,6 +1343,10 @@ pub async fn install(headers: HeaderMap, State(s): State<Arc<AppState>>, Json(b)
     let cleanup = |h: &Option<PathBuf>| if let Some(h) = h { let _ = std::fs::remove_dir_all(h); };
     let id = manifest.id.clone();
     if let Err(why) = manifest.command(&src_dir) { cleanup(&holder); return Err(bad(&why)); }
+    if !manifest.icon.is_empty() && manifest.icon_data(&src_dir).is_none() {
+        cleanup(&holder);
+        return Err(bad("The plugin's icon file is missing, over 256 KB, or isn't a .ico or .png"));
+    }
     let existing = match load(&s.pool, &id).await { Ok(e) => e, Err(e) => { cleanup(&holder); return Err(e); } };
     if existing.is_none() {
         let count: i64 = sqlx::query("SELECT COUNT(*) AS n FROM plugins").fetch_one(&s.pool).await.map_err(|_| dberr())?.get("n");
