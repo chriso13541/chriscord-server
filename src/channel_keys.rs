@@ -205,6 +205,9 @@ pub async fn put_enc_key(
         .bind(&my_key).bind(&enc_hex).bind(b.sig.to_lowercase())
         .execute(&s.pool).await.map_err(|_| dberr())?;
     changed(&s, None); // others can now share channel keys with them
+    // A plugin's first key (its first start): apps can only open its lanes
+    // with it, so they load the plugin list again.
+    if crate::plugins::is_plugin_key(&s.pool, &my_key).await { crate::plugins::announce(&s); }
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 

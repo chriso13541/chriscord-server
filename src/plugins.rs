@@ -883,7 +883,10 @@ pub async fn id_of_user(pool: &SqlitePool, username: &str) -> Option<String> {
 }
 
 /// Tells every app to load the plugins again (installed, changed, started…).
-fn announce(s: &AppState) {
+/// The plugin list changed (installed, updated, removed, started or
+/// stopped, a new key): every app loads it again, and opens lanes to the
+/// plugins now running.
+pub fn announce(s: &AppState) {
     let _ = s.tx.send(serde_json::json!({ "type": "plugins_updated" }).to_string());
 }
 

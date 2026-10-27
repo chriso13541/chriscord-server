@@ -139,6 +139,10 @@ async fn handle_socket(socket: WebSocket, token: String, initial_status: Option<
     let mut rx = state.tx.subscribe();
     broadcast_users(&state);
     broadcast_voice_state(&state);
+    // A plugin that's just started: apps open their lanes to it now (they
+    // only open lanes to plugins the list says are running — without this,
+    // nothing did until someone typed one of its commands).
+    if plugin_id.is_some() { crate::plugins::announce(&state); }
 
     let mut subscribed_board: Option<String> = None;
     let conn_id = NEXT_CONN_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -981,7 +985,10 @@ async fn handle_socket(socket: WebSocket, token: String, initial_status: Option<
     // it's back).
     if let Some(id) = &plugin_id {
         let still_on = state.online.lock().unwrap().contains_key(&username);
-        if !still_on { crate::plugins::gone(&state, id); }
+        if !still_on {
+            crate::plugins::gone(&state, id);
+            crate::plugins::announce(&state); // shown as not running
+        }
     }
 
     // A dropped connection ends their audio — but rather than vanishing
