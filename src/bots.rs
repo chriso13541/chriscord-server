@@ -319,6 +319,10 @@ pub async fn tags(pool: &SqlitePool) -> serde_json::Map<String, serde_json::Valu
 pub async fn forget(pool: &SqlitePool, key: &str) {
     let _ = sqlx::query("DELETE FROM bots WHERE public_key = ?").bind(key).execute(pool).await;
     let _ = sqlx::query("DELETE FROM bot_channels WHERE public_key = ?").bind(key).execute(pool).await;
+    // Its published encryption key too: nothing is sealed for it again. (The
+    // channel keys it was given stay listed: that's how the server knows
+    // those channels need a new key — channel_keys.rs.)
+    let _ = sqlx::query("DELETE FROM user_enc_keys WHERE public_key = ?").bind(key).execute(pool).await;
     let mut l = live();
     let gone: Vec<String> = l.tokens.iter().filter(|(_, k)| k.as_str() == key).map(|(t, _)| t.clone()).collect();
     for t in gone { l.tokens.remove(&t); l.reqs.remove(&t); }

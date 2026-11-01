@@ -797,6 +797,8 @@ pub(crate) async fn kick_user(s: &Arc<AppState>, username: &str, ban: bool, reas
     // A bot that's kicked or banned is no longer added here: it needs adding
     // again (bots.rs).
     crate::bots::forget(&s.pool, &public_key).await;
+    // Out of any call now — not left "reconnecting" there for a minute.
+    crate::ws::drop_from_voice(s, &username).await;
     crate::ws::send_to_user(s, &username, serde_json::json!({
         "type": "kicked", "banned": body.ban, "reason": reason,
     }));

@@ -1026,6 +1026,24 @@ async fn handle_socket(socket: WebSocket, token: String, initial_status: Option<
     }
 }
 
+/// Takes username out of voice altogether, at once: the call they're in,
+/// and a "reconnecting" place kept for them after a dropped connection. For
+/// someone removed from the server — a plugin taken out, above all: its
+/// reinstalled version comes back under the same name with a new identity,
+/// and must start fresh, not land in the old one's place.
+pub async fn drop_from_voice(state: &Arc<AppState>, username: &str) {
+    { voice_owners().lock().unwrap().remove(username); }
+    let was_reconnecting = { state.voice_reconnecting.lock().unwrap().remove(username).is_some() };
+    let left = { state.voice.lock().unwrap().remove(username) };
+    { state.voice_status.lock().unwrap().remove(username); }
+    if let Some(bid) = &left {
+        voice::close_participant(state, bid, username).await;
+    }
+    if left.is_some() || was_reconnecting {
+        broadcast_voice_state(state);
+    }
+}
+
 /// Delivers a message to exactly one connected user, by piggybacking on the
 /// same broadcast channel everything else uses — every connection already
 /// receives every broadcast and decides whether to act on it, so a
