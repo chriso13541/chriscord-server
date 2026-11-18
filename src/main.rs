@@ -270,6 +270,7 @@ async fn main() {
         .route("/api/messages/:id/zip/link", get(zips::zip_link))
         .route("/api/zips/:file",       get(zips::serve_zip))
         .route("/api/pfp/:username",    get(pfp::serve_pfp))
+        .route("/api/pfps",             get(pfp::pfp_index))
         .route("/api/profile/:username", get(profile::get_profile))
         .route("/api/banner/:username",  get(profile::serve_banner))
         .route("/api/preview",          get(preview::get_preview))

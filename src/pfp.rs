@@ -31,6 +31,8 @@ use axum::body::Body;
 use axum::extract::{Path, State};
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
+use axum::Json;
+use sqlx::Row;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -201,4 +203,37 @@ pub async fn serve_pfp(
         }
         Err(_) => StatusCode::NOT_FOUND.into_response(),
     }
+}
+
+/// GET /api/pfps — the version of every picture and banner here, in one
+/// answer, so apps keep them cached on disk and download only what changed
+/// (the app's pfpcache.go). For each member: their identity key (what the
+/// files here are named by) and the timestamps of their picture and banner
+/// (0 = none). For each unclaimed imported person: an id and their avatar
+/// file's age as its version. A pfp_updated or profile_updated broadcast
+/// still says when one changes; this is for (re)connecting.
+pub async fn pfp_index(
+    headers: HeaderMap,
+    State(s): State<Arc<AppState>>,
+) -> Response {
+    if crate::db::verify_token(&s.pool, token_from(&headers)).await.ok().flatten().is_none() {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    let rows = match sqlx::query("SELECT username, public_key FROM users").fetch_all(&s.pool).await {
+        Ok(r) => r,
+        Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    };
+    let dir = pfps_dir();
+    let users: Vec<serde_json::Value> = rows.iter().map(|r| {
+        let key = r.get::<String, _>("public_key").to_lowercase();
+        let pfp = if dir.join(format!("{key}.png")).exists() { cached_timestamp(&key).unwrap_or(0) } else { 0 };
+        serde_json::json!({
+            "username": r.get::<String, _>("username"),
+            "key": key,
+            "pfp": pfp,
+            "banner": crate::profile::banner_version(&key),
+        })
+    }).collect();
+    let imported = crate::imports::placeholder_avatar_versions(&s.pool).await;
+    Json(serde_json::json!({ "users": users, "imported": imported })).into_response()
 }

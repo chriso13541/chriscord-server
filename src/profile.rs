@@ -84,6 +84,15 @@ fn read_stored(username: &str) -> Option<StoredProfile> {
     serde_json::from_str(&raw).ok()
 }
 
+/// The version of a member's banner (their profile's timestamp), or 0 if
+/// they have none — for pfp::pfp_index.
+pub fn banner_version(key: &str) -> i64 {
+    match read_stored(key) {
+        Some(p) if p.has_banner && pfps_dir().join(format!("{key}.banner")).exists() => p.updated_at,
+        _ => 0,
+    }
+}
+
 /// The profile timestamp this server has cached for a user, if any.
 pub fn cached_timestamp(username: &str) -> Option<i64> {
     read_stored(username).map(|p| p.updated_at)

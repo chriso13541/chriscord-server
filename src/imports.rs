@@ -258,6 +258,25 @@ pub async fn placeholder_avatar(pool: &SqlitePool, username: &str) -> Option<Vec
     tokio::fs::read(avatar_path(&source, &id)).await.ok()
 }
 
+/// Every unclaimed imported person who has an avatar: their placeholder
+/// name, an id, and the avatar file's age as its version — for
+/// pfp::pfp_index (an imported avatar doesn't change, but a re-import can
+/// replace it).
+pub async fn placeholder_avatar_versions(pool: &SqlitePool) -> Vec<serde_json::Value> {
+    let rows = sqlx::query("SELECT source, source_id, placeholder FROM imported_authors WHERE claimed_by IS NULL")
+        .fetch_all(pool).await.unwrap_or_default();
+    rows.iter().filter_map(|r| {
+        let (source, id): (String, String) = (r.get("source"), r.get("source_id"));
+        let modified = std::fs::metadata(avatar_path(&source, &id)).ok()?.modified().ok()?;
+        let v = modified.duration_since(std::time::UNIX_EPOCH).ok()?.as_secs() as i64;
+        Some(serde_json::json!({
+            "username": r.get::<String, _>("placeholder"),
+            "id": format!("{source}:{id}"),
+            "v": v,
+        }))
+    }).collect()
+}
+
 /// The profile card for an unclaimed imported person, for profile::get_profile.
 pub async fn placeholder_profile(pool: &SqlitePool, username: &str, viewer: &str) -> Option<serde_json::Value> {
     let (source, id, name, handle) = placeholder(pool, username).await?;
