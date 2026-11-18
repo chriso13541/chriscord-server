@@ -7,7 +7,8 @@
 // the key, for the recipient's published encryption key. People are
 // identified by their identity key (users.public_key), not their name.
 //
-//   PUT  /api/e2ee/enc-key        publish your encryption key (signed by your identity key)
+//   PUT  /api/e2ee/enc-key        publish your encryption key (signed by your identity key),
+//                                 and its ML-KEM-768 half for quantum-safe boxes (pq_key)
 //   GET  /api/boards/:id/keys     your boxes for a channel, who can see it, and whether
 //                                 it needs a new generation (someone lost access)
 //   POST /api/boards/:id/keys     start the next generation, with a box for each member
@@ -16,6 +17,12 @@
 //
 // Every change is announced as {"type":"e2ee_changed"} so online apps share
 // keys with whoever needs them.
+//
+// Quantum-safe boxes: apps seal channel keys with X25519 and ML-KEM-768
+// together (the app's pqcrypt.go), so the boxes kept here can't be opened
+// later by a quantum computer. The server only stores and hands out the
+// ML-KEM key; apps check its signature themselves, and only seal for
+// members who have one. A box is bigger now (about 1.5 KB of base64).
 
 use axum::{
     extract::{Path, State},
@@ -41,10 +48,17 @@ fn bad(msg: &str) -> ApiErr { err(StatusCode::BAD_REQUEST, msg) }
 /// What an identity key signs to vouch for an encryption key (must match
 /// encKeyMessage in the app).
 const ENC_KEY_CONTEXT: &[u8] = b"chriscord-e2ee-v1/enc-key\x00";
+/// What an identity key signs to vouch for its X25519 and ML-KEM keys
+/// together (must match encBundleMessage and pqSuite in the app).
+const ENC_BUNDLE_CONTEXT: &[u8] =
+    b"chriscord-e2ee-v2/enc-bundle\x00x25519+mlkem768+hkdf-sha256+chacha20poly1305\x00";
+/// An ML-KEM-768 public (encapsulation) key, in bytes.
+const MLKEM768_KEY_LEN: usize = 1184;
 /// Most boxes in one request, and the most one box may be (base64): a
-/// sealed 32-byte key is about 100 characters.
+/// hybrid box ("pq1:" + ML-KEM ciphertext, nonce, sealed key) is about
+/// 1540 characters; an older X25519-only one about 100.
 const MAX_BOXES: usize = 5000;
-const MAX_BOX_LEN: usize = 512;
+const MAX_BOX_LEN: usize = 2048;
 /// Most entries one /api/e2ee/pending answer lists (the app asks again).
 const MAX_PENDING: usize = 1000;
 
@@ -56,6 +70,16 @@ pub async fn init(pool: &SqlitePool) -> Result<(), sqlx::Error> {
             sig        TEXT NOT NULL       -- identity key's signature over it (hex)
         )",
     ).execute(pool).await?;
+    // The ML-KEM-768 half (hex) and the identity key's signature over both
+    // keys together. Added to existing databases; NULL until the member's
+    // app publishes one.
+    for col in ["pq_key", "pq_sig"] {
+        let has = sqlx::query("SELECT 1 FROM pragma_table_info('user_enc_keys') WHERE name = ?")
+            .bind(col).fetch_optional(pool).await?.is_some();
+        if !has {
+            sqlx::query(&format!("ALTER TABLE user_enc_keys ADD COLUMN {col} TEXT")).execute(pool).await?;
+        }
+    }
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS channel_keys (
             board_id   TEXT NOT NULL,
@@ -90,19 +114,35 @@ async fn me(h: &HeaderMap, s: &AppState) -> Result<(String, String), ApiErr> {
     Ok((user, key.to_lowercase()))
 }
 
+/// A member's published encryption keys.
+#[derive(Clone, Default)]
+struct EncKeys {
+    enc_key: Option<String>,
+    sig:     Option<String>,
+    pq_key:  Option<String>,
+    pq_sig:  Option<String>,
+}
+
 #[derive(Clone)]
 struct Member {
     username:   String,
     public_key: String,
     enc_key:    Option<String>,
     sig:        Option<String>,
+    pq_key:     Option<String>,
+    pq_sig:     Option<String>,
 }
 
 impl Member {
+    fn new(username: String, public_key: String, k: EncKeys) -> Self {
+        Member { username, public_key, enc_key: k.enc_key, sig: k.sig, pq_key: k.pq_key, pq_sig: k.pq_sig }
+    }
+
     fn json(&self) -> serde_json::Value {
         serde_json::json!({
             "username": self.username, "public_key": self.public_key,
             "enc_key": self.enc_key, "sig": self.sig,
+            "pq_key": self.pq_key, "pq_sig": self.pq_sig,
         })
     }
 }
@@ -113,19 +153,21 @@ async fn all_members(pool: &SqlitePool) -> Vec<Member> {
     sqlx::query("SELECT username, public_key FROM users").fetch_all(pool).await.unwrap_or_default()
         .iter().map(|r| {
             let public_key = r.get::<String, _>("public_key").to_lowercase();
-            let (enc_key, sig) = match enc.get(&public_key) {
-                Some((k, s)) => (Some(k.clone()), Some(s.clone())),
-                None => (None, None),
-            };
-            Member { username: r.get("username"), public_key, enc_key, sig }
+            let k = enc.get(&public_key).cloned().unwrap_or_default();
+            Member::new(r.get("username"), public_key, k)
         }).collect()
 }
 
-/// identity key → (encryption key, signature), including people who've
-/// since left (their old boxes still name them as the sender).
-async fn enc_keys(pool: &SqlitePool) -> HashMap<String, (String, String)> {
-    sqlx::query("SELECT public_key, enc_key, sig FROM user_enc_keys").fetch_all(pool).await.unwrap_or_default()
-        .iter().map(|r| (r.get::<String, _>("public_key"), (r.get::<String, _>("enc_key"), r.get::<String, _>("sig"))))
+/// identity key → its encryption keys, including people who've since left
+/// (their old boxes still name them as the sender).
+async fn enc_keys(pool: &SqlitePool) -> HashMap<String, EncKeys> {
+    sqlx::query("SELECT public_key, enc_key, sig, pq_key, pq_sig FROM user_enc_keys").fetch_all(pool).await.unwrap_or_default()
+        .iter().map(|r| (r.get::<String, _>("public_key"), EncKeys {
+            enc_key: Some(r.get("enc_key")),
+            sig:     Some(r.get("sig")),
+            pq_key:  r.get("pq_key"),
+            pq_sig:  r.get("pq_sig"),
+        }))
         .collect()
 }
 
@@ -175,6 +217,12 @@ fn changed(s: &AppState, board_id: Option<&str>) {
 pub struct EncKeyReq {
     enc_key: String,
     sig:     String,
+    /// ML-KEM-768 key (hex) and the identity key's signature over both keys
+    /// (ENC_BUNDLE_CONTEXT): left out by older apps and plugins.
+    #[serde(default)]
+    pq_key:  Option<String>,
+    #[serde(default)]
+    pq_sig:  Option<String>,
 }
 
 pub async fn put_enc_key(
@@ -194,15 +242,41 @@ pub async fn put_enc_key(
     msg.extend_from_slice(&enc);
     vk.verify(&msg, &sig).map_err(|_| bad("The signature doesn't match your identity key"))?;
 
+    // The ML-KEM half, if sent: both or neither, the right size, and signed
+    // together with the X25519 key.
+    let pq: Option<(String, String)> = match (&b.pq_key, &b.pq_sig) {
+        (None, None) => None,
+        (Some(k), Some(sg)) => {
+            let ek = hex::decode(k).map_err(|_| bad("Invalid ML-KEM key"))?;
+            if ek.len() != MLKEM768_KEY_LEN { return Err(bad("Invalid ML-KEM key")); }
+            let pq_sig = Signature::from_slice(&hex::decode(sg).map_err(|_| bad("Invalid signature"))?)
+                .map_err(|_| bad("Invalid signature"))?;
+            let mut bundle = ENC_BUNDLE_CONTEXT.to_vec();
+            bundle.extend_from_slice(&enc);
+            bundle.extend_from_slice(&ek);
+            vk.verify(&bundle, &pq_sig).map_err(|_| bad("The ML-KEM key's signature doesn't match your identity key"))?;
+            Some((hex::encode(&ek), sg.to_lowercase()))
+        }
+        _ => return Err(bad("pq_key and pq_sig go together")),
+    };
+
     let enc_hex = hex::encode(&enc);
-    let existing: Option<String> = sqlx::query("SELECT enc_key FROM user_enc_keys WHERE public_key = ?")
+    let existing = sqlx::query("SELECT enc_key, pq_key FROM user_enc_keys WHERE public_key = ?")
         .bind(&my_key).fetch_optional(&s.pool).await.map_err(|_| dberr())?
-        .map(|r| r.get("enc_key"));
-    if existing.as_deref() == Some(enc_hex.as_str()) {
-        return Ok(Json(serde_json::json!({ "ok": true }))); // already have it
+        .map(|r| (r.get::<String, _>("enc_key"), r.get::<Option<String>, _>("pq_key")));
+    if let Some((old_enc, old_pq)) = &existing {
+        // Already have it — and an older app of the same account (no ML-KEM
+        // key) doesn't take away the one a newer app published.
+        if *old_enc == enc_hex && (pq.is_none() || pq.as_ref().map(|p| &p.0) == old_pq.as_ref()) {
+            return Ok(Json(serde_json::json!({ "ok": true })));
+        }
     }
-    sqlx::query("INSERT OR REPLACE INTO user_enc_keys (public_key, enc_key, sig) VALUES (?, ?, ?)")
-        .bind(&my_key).bind(&enc_hex).bind(b.sig.to_lowercase())
+    let (pq_key, pq_sig) = match pq {
+        Some((k, sg)) => (Some(k), Some(sg)),
+        None => (None, None),
+    };
+    sqlx::query("INSERT OR REPLACE INTO user_enc_keys (public_key, enc_key, sig, pq_key, pq_sig) VALUES (?, ?, ?, ?, ?)")
+        .bind(&my_key).bind(&enc_hex).bind(b.sig.to_lowercase()).bind(pq_key).bind(pq_sig)
         .execute(&s.pool).await.map_err(|_| dberr())?;
     changed(&s, None); // others can now share channel keys with them
     // A plugin's first key (its first start): apps can only open its lanes
@@ -241,17 +315,12 @@ pub async fn get_keys(
     ).bind(&board_id).bind(&my_key).fetch_all(&s.pool).await.map_err(|_| dberr())?
         .iter().map(|r| {
             let sender: String = r.get("sender");
-            let (enc_key, sig) = match enc.get(&sender) {
-                Some((k, s)) => (Some(k.clone()), Some(s.clone())),
-                None => (None, None),
-            };
+            let k = enc.get(&sender).cloned().unwrap_or_default();
+            let username = names.get(sender.as_str()).copied().unwrap_or("").to_string();
             serde_json::json!({
                 "generation": r.get::<i64, _>("generation"),
                 "box": r.get::<String, _>("box"),
-                "sender": {
-                    "username": names.get(sender.as_str()).copied().unwrap_or(""),
-                    "public_key": sender, "enc_key": enc_key, "sig": sig,
-                },
+                "sender": Member::new(username, sender, k).json(),
             })
         }).collect();
 
